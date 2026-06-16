@@ -110,7 +110,7 @@ def get_complete_content(content):
 
 
 commonBlackList = [word for item in [
-    "定位 部分 东北 徽 限深圳 北京 天津 重庆 深圳地区 山东 福建 江苏 云南 江西 河北 广东 吉林 湖北 河南 陕西 湖南 四川 宁夏 广西 辽宁 甘肃 内蒙古 青海 贵州 山西 新疆",
+    "定位 部分 东北 徽 限深圳 北京 重庆 深圳地区 山东 福建 江苏 云南 江西 河北 广东 吉林 湖北 河南 陕西 湖南 四川 宁夏 广西 辽宁 甘肃 内蒙古 青海 贵州 山西 新疆",
     "厦门 南京 东莞 广州 南海 苏州 中山 常州 青岛 成都 武汉 合肥 揭阳 无锡 济南 大连 石家庄 泉州 丹东 茂名 长沙 泰州 郑州 惠州 威海 绍兴 哈尔滨 贵阳",
     # ----卡----
     "万事达 visa 车主 刷卡达标 北分 陆金所 缤纷生活 浦大喜奔 邮储联名 美团联名 闪光卡 联名卡 邮政数币 农行刷卡金 农行数币 会员返现 兴业生活 农信 颜卡",
@@ -296,7 +296,7 @@ def notify_markdown():
 2. 吐槽
 3. 美妆个护商品
 4. 女装商品
-5. 限定这些地区的活动（深圳、北京、天津、重庆）注意"上海交通卡"是全国通用的活动
+5. 限定这些地区的活动（深圳、北京、重庆）注意"上海交通卡"是全国通用的活动
 6. 提问或求助帖(买什么 买那个)
 7. 部分银行信用卡活动["中国银行","农业银行","交通银行","浦发", "邮储", "邮政", "光大", "兴业","平安", "浙商","杭州银行","北京银行","宁波银行"]
 8. 这些银行的数字人民币活动("农业银行","交通银行","浦发","邮储","邮政","光大","兴业","平安","浙商","杭州银行","北京银行", "宁波银行" 工商银行 招商银行 中信)
@@ -322,7 +322,7 @@ def notify_markdown():
                 markdown_text += f'![]({img})'
         summary = json_data[0]['title']
         # 发送通知
-        markdown_text += send_wx_push(summary, markdown_text, 37188)
+        # markdown_text += send_wx_push(summary, markdown_text, 37188)
         dingding_bot_with_key(summary, markdown_text, f"{key_name.upper()}_BOT_TOKEN")
         md_name = f"log_{key_name}_{get_day_string()}.md"
         with open(md_name, 'a', encoding='utf-8') as f:
