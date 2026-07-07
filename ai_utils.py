@@ -17,7 +17,7 @@ class AIHelper:
         if not self.base_url:
             raise ValueError("API_URL 环境变量未设置")
 
-    async def chat_completion(self, prompt: str, model: str = "gemini-2.5-pro") -> str:
+    async def chat_completion(self, prompt: str, model: str = "gemini-3-flash-preview") -> str:
         # 调用API进行对话
         headers = {
             "Content-Type": "application/json",

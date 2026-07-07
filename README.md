@@ -15,7 +15,7 @@
 * [weibo_summary](weibo_summary.py) 抓取微博热搜榜，Sqlite数据库去重，过滤一些不感兴趣的内容，简单的词频分析
 * [send_qq_email](send_qq_email.py) 发送带附件的电子邮件
 * [job_spider](job_spider.py) 指定过滤条件获取远程工作信息
-* [xb](xb.py) 全网羊毛线报精选，使用 gemini-2.5-pro 模型进行内容分析
+* [xb](xb.py) 全网羊毛线报精选，使用 gemini-3-flash-preview 模型进行内容分析
 * [douban_spider](douban_spider.py) 豆瓣小组（上海租房版demo）
 
 ## 安装依赖库
