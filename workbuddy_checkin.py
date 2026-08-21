@@ -174,7 +174,7 @@ def main():
         print("RESULT=HTTP_ERR code=%s" % cc)
 
     if _HAS_NOTIFY:
-        sendNotify.send(title, content)
+        sendNotify.serverJMy(title, content)
 
 
 if __name__ == '__main__':
