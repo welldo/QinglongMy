@@ -17,6 +17,7 @@
 * [job_spider](job_spider.py) 指定过滤条件获取远程工作信息
 * [xb](xb.py) 全网羊毛线报精选，使用 gemini-3-flash-preview 模型进行内容分析
 * [douban_spider](douban_spider.py) 豆瓣小组（上海租房版demo）
+* [workbuddy_checkin](workbuddy_checkin.py) WorkBuddy 每日积分自动签到（100积分/天，连续第7天1000积分），自动读取本机登录态，幂等可重复运行
 
 ## 安装依赖库
 
@@ -69,6 +70,13 @@ export API_URL=
 ## WxPusher appToken及uid
 export WX_PUSH_TOKEN=
 export admin_uid=
+
+## WorkBuddy 每日签到（workbuddy_checkin.py）
+# 留空时自动读取本机 WorkBuddy 桌面端(v5.3.8+)明文登录态；跨机/容器部署时手动填写
+export WB_ACCESS_TOKEN=
+export WB_USER_ID=
+# 可选：domain 一般留空自动读取
+export WB_DOMAIN=
    ```
 
 若没有使用load_dotenv()，所有新增PUSH_KEY需要在[sendNotify](sendNotify.py)的push_config中配置key名称后才能生效
