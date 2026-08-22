@@ -12,6 +12,7 @@ class DoubanScraper:
 
     def get_group_discussions(self, group_id: str, page: int = 0) -> List[Dict]:
         """获取豆瓣小组讨论列表"""
+        context = None
         try:
             context = self.browser.new_context(
                 user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
@@ -59,7 +60,7 @@ class DoubanScraper:
                     if browser_page.wait_for_selector(selector, timeout=11000):
                         if 'topic-item' in selector:
                             # 新版布局
-                            discussions = browser_page.evaluate("""
+                            discussions = browser_page.evaluate(r"""
                                 () => {
                                     const items = document.querySelectorAll('.article .topic-item');
                                     return Array.from(items).map(item => {
@@ -75,7 +76,7 @@ class DoubanScraper:
                             """)
                         else:
                             # 旧版布局
-                            discussions = browser_page.evaluate("""
+                            discussions = browser_page.evaluate(r"""
                                 () => {
                                     const rows = document.querySelectorAll('table.olt tr');
                                     return Array.from(rows).slice(1).map(row => {
@@ -101,10 +102,11 @@ class DoubanScraper:
             print(f"爬取失败: {str(e)}")
             return []
         finally:
-            try:
-                context.close()
-            except:
-                pass
+            if context is not None:
+                try:
+                    context.close()
+                except Exception:
+                    pass
 
     def _handle_verification(self, page) -> None:
         """处理反爬虫验证"""

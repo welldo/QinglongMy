@@ -1,5 +1,5 @@
 """
-cron: 00 15 1 * * 7  send_qq_email.py
+cron: 00 15 1 * * 0  send_qq_email.py
 new Env('qq邮件');
 """
 import os
@@ -37,32 +37,46 @@ def generate_attachment():
     return part
 
 
-def delete_attachment_file():
-    if os.path.exists(attachment_path):
-        try:
-            os.remove(attachment_path)
-            os.remove('wb.db')
-            print(f"{attachment_path} 已被删除。")
-        except OSError as e:
-            print(f"删除{attachment_path} 出错: {e}")
+def delete_db_files():
+    """邮件发送成功后清理本地数据库文件。"""
+    for path in (attachment_path, 'wb.db'):
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+                print(f"{path} 已被删除。")
+            except OSError as e:
+                print(f"删除{path} 出错: {e}")
 
 
-msg = MIMEMultipart()
-msg['From'] = f' <{sender}>'
-msg['To'] = f' <{receiver}>'
-msg['Subject'] = f'本周收盘行情及{attachment_path}附件。'
+def build_message():
+    msg = MIMEMultipart()
+    msg['From'] = f' <{sender}>'
+    msg['To'] = f' <{receiver}>'
+    msg['Subject'] = f'本周收盘行情及{attachment_path}附件。'
+    msg.attach(generate_html_body())
+    msg.attach(generate_attachment())
+    return msg
 
-msg.attach(generate_html_body())
-msg.attach(generate_attachment())
 
-if __name__ == "__main__":
+def main():
+    if not sender or not password:
+        print("未设置 EMAIL_ADDRESS / EMAIL_PWD，取消发送")
+        return
+
+    server = None
     try:
         server = smtplib.SMTP_SSL(smtp_server, smtp_port)
         server.login(sender, password)
+        msg = build_message()
         server.sendmail(msg['From'], msg['To'], msg.as_string())
         print("邮件发送成功")
-        delete_attachment_file()
+        delete_db_files()
     except smtplib.SMTPException as e:
         print("Error: 无法发送邮件", e)
     finally:
-        server.quit()
+        if server is not None:
+            server.quit()
+
+
+if __name__ == "__main__":
+    main()

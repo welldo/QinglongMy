@@ -48,17 +48,6 @@ class DBHelper:
         if self.conn:
             self.conn.close()
 
-    conn = sqlite3.connect(f'{key_name}.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS titles (
-        id INTEGER PRIMARY KEY,
-        path INTEGER,
-        name TEXT UNIQUE NOT NULL,
-        href TEXT NOT NULL
-    )
-    ''')
-
 
 db = DBHelper(f'{key_name}.db')
 load_dotenv()
@@ -181,7 +170,7 @@ lowBlackList = [word for item in [
 
 def filter_list(tr):
     title = tr.get_text().lower().strip()
-    if title.endswith("？" or "?"):
+    if title.endswith(("？", "?")):
         return False
     if tr['href'].startswith("http"):
         return False

@@ -181,21 +181,28 @@ def dingding_bot(title: str, content: str) -> None:
 def dingding_bot_with_key(title: str, content: str, bot_key: str) -> None:
     """
     使用 钉钉机器人 推送消息。
+    bot_key 为存放 access_token 的环境变量名；
+    若同时存在 {bot_key}_SECRET 环境变量（SEC 开头的加签密钥），则按官方协议加签。
     """
-    if not os.getenv(bot_key):
+    token = os.getenv(bot_key)
+    if not token:
         print(f"钉钉机器人{bot_key} 未设置!!\n取消推送")
         return
     print(f"钉钉机器人{bot_key} 服务启动")
-    token = os.getenv(bot_key)
-    timestamp = str(round(time.time() * 1000))
-    secret_enc = token.encode("utf-8")
-    string_to_sign = "{}\n{}".format(timestamp, bot_key)
-    string_to_sign_enc = string_to_sign.encode("utf-8")
-    hmac_code = hmac.new(
-        secret_enc, string_to_sign_enc, digestmod=hashlib.sha256
-    ).digest()
-    sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
-    url = f'https://oapi.dingtalk.com/robot/send?access_token={token}&timestamp={timestamp}&sign={sign}'
+
+    secret = os.getenv(f"{bot_key}_SECRET", "")
+    url = f'https://oapi.dingtalk.com/robot/send?access_token={token}'
+    if secret:
+        # 官方加签协议：sign = base64(hmac_sha256(secret, timestamp + "\n" + secret))
+        timestamp = str(round(time.time() * 1000))
+        secret_enc = secret.encode("utf-8")
+        string_to_sign_enc = f"{timestamp}\n{secret}".encode("utf-8")
+        hmac_code = hmac.new(
+            secret_enc, string_to_sign_enc, digestmod=hashlib.sha256
+        ).digest()
+        sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
+        url += f'&timestamp={timestamp}&sign={sign}'
+
     headers = {"Content-Type": "application/json;charset=utf-8"}
     data = {"msgtype": "markdown", "markdown": {"title": f"{title}", "text": f"{content}"}}
     response = requests.post(
@@ -205,7 +212,7 @@ def dingding_bot_with_key(title: str, content: str, bot_key: str) -> None:
     if not response["errcode"]:
         print(f"钉钉机器人{bot_key} 推送成功！")
     else:
-        print("钉钉机器人{bot_key} 推送失败！")
+        print(f"钉钉机器人{bot_key} 推送失败！")
 
 
 def feishu_bot(title: str, content: str) -> None:
