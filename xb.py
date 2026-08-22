@@ -7,7 +7,7 @@ new Env('线报0818');
 from bs4 import BeautifulSoup
 import requests
 from date_utils import get_day_string
-from sendNotify import is_product_env, dingding_bot_with_key, send_wx_push
+from sendNotify import is_product_env, dingding_bot_with_key
 import sqlite3
 import re
 import asyncio
@@ -311,7 +311,6 @@ def notify_markdown():
                 markdown_text += f'![]({img})'
         summary = json_data[0]['title']
         # 发送通知
-        # markdown_text += send_wx_push(summary, markdown_text, 37188)
         dingding_bot_with_key(summary, markdown_text, f"{key_name.upper()}_BOT_TOKEN")
         md_name = f"log_{key_name}_{get_day_string()}.md"
         with open(md_name, 'a', encoding='utf-8') as f:

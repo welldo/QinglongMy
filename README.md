@@ -38,8 +38,6 @@
 
 [PushMe](https://push.i-i.me/)
 
-[wxpusher](https://wxpusher.zjiecode.com/admin/main/message/send)(微信暂时无法推送)
-
 [Gemini API密钥](https://aistudio.google.com/app/apikey)
 
 钉钉群机器人
@@ -68,10 +66,6 @@ export JOB_BOT_TOKEN=
 export API_KEY=
 export API_URL=
 
-## WxPusher appToken及uid
-export WX_PUSH_TOKEN=
-export admin_uid=
-
 ## WorkBuddy 每日签到（workbuddy_checkin.py）
 # 留空时自动读取本机 WorkBuddy 桌面端(v5.3.8+)明文登录态；跨机/容器部署时手动填写
 export WB_ACCESS_TOKEN=
@@ -93,9 +87,6 @@ export TRAE_HOST=
 
 复制 .env.example 为 .env 并填写配置
 
-## 全网羊毛线报精选-PushMe订阅
-
-![](https://wxpusher.zjiecode.com/api/qrcode/CeSPArVFNdJlGE2lmebXUKTQZTEY3ed8luFzGQ61Ko8H39eBhEhnwvSCNKuFBJqn.jpg)
 
 ## Special statement:
 
