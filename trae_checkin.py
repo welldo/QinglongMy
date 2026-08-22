@@ -1,7 +1,7 @@
 #!/bin/env python3
 # -*- coding: utf-8 -*
 """
-cron: 23 8 * * * trae_checkin.py
+cron: 12 0 * * * trae_checkin.py
 new Env('TraeWork每日积分签到');
 
 ==================== Trae Work 自动签到（参考 luckymiaow/trae-mate 重写） ====================
@@ -148,9 +148,12 @@ def parse_time_ms(value) -> float:
         return 0
 
 
-def read_credentials_from_dir(data_dir: str):
-    """从实例 data-dir 解析凭据，返回 dict 或 None。"""
-    storage_path = os.path.join(data_dir, STORAGE_REL)
+def read_local_credential():
+    """读取主实例 %APPDATA%\\TRAE SOLO CN 登录态，返回凭据 dict 或 None。"""
+    appdata = os.environ.get("APPDATA", "")
+    if not appdata:
+        return None
+    storage_path = os.path.join(appdata, "TRAE SOLO CN", STORAGE_REL)
     if not os.path.isfile(storage_path):
         return None
     try:
@@ -163,52 +166,42 @@ def read_credentials_from_dir(data_dir: str):
         token = (auth.get("token") or "").strip()
         if not token:
             return None
-        device_id = (storage.get("telemetry.devDeviceId") or "").strip()
-        account = auth.get("account") or {}
         return {
             "token": token,
-            "device_id": device_id,
+            "device_id": (storage.get("telemetry.devDeviceId") or "").strip(),
             "user_id": str(auth.get("userId") or ""),
             "host": (auth.get("host") or "").rstrip("/"),
-            "name": account.get("username") or f"TRAE用户{auth.get('userId') or ''}",
             "expires_ms": parse_time_ms(auth.get("expiredAt")),
-            "dir": data_dir,
         }
     except Exception as e:
         print(f"[warn] 解析 {storage_path} 失败: {e}")
         return None
 
 
-def scan_accounts():
-    """读取主实例 %APPDATA%\\TRAE SOLO CN 登录态，返回 0 或 1 个账号。"""
-    appdata = os.environ.get("APPDATA", "")
-    if not appdata:
-        return []
-    cred = read_credentials_from_dir(os.path.join(appdata, "TRAE SOLO CN"))
-    if cred and cred["user_id"]:
-        return [cred]
-    return []
-
-
 def resolve_credentials():
-    """返回账号列表。环境变量优先（单账号），否则读取本机 Trae 主实例登录态。"""
+    """返回凭据 dict 或 None。环境变量优先，否则读取本机 Trae 主实例登录态。"""
     token = os.environ.get("TRAE_TOKEN", "").strip()
-    device_id = os.environ.get("TRAE_DEVICE_ID", "").strip()
-    host = os.environ.get("TRAE_HOST", "").strip().rstrip("/")
-    uid = os.environ.get("TRAE_USER_ID", "").strip()
     if token:
-        return [{
-            "token": token, "device_id": device_id, "host": host,
-            "user_id": uid, "name": uid or "env账号",
-            "expires_ms": 0, "dir": "",
-        }]
+        cred = {
+            "token": token,
+            "device_id": os.environ.get("TRAE_DEVICE_ID", "").strip(),
+            "host": os.environ.get("TRAE_HOST", "").strip().rstrip("/"),
+            "user_id": os.environ.get("TRAE_USER_ID", "").strip(),
+            "expires_ms": 0,
+        }
+        # 从本机登录态回填 userId/过期时间（仅展示与提示用，不影响鉴权）
+        local = read_local_credential()
+        if local:
+            cred["user_id"] = cred["user_id"] or local["user_id"]
+            cred["expires_ms"] = local["expires_ms"]
+        return cred
 
-    accounts = scan_accounts()
-    if not accounts:
+    cred = read_local_credential()
+    if not cred:
         print("未发现 Trae 登录态：请确保本机已登录 Trae 桌面端"
               "（%APPDATA%\\TRAE SOLO CN\\User\\globalStorage\\storage.json），"
               "或设置 TRAE_TOKEN / TRAE_DEVICE_ID 环境变量。")
-    return accounts
+    return cred
 
 
 AUTH_FAIL_KEYWORDS = ("unauthorized", "token", "expired", "not login",
@@ -289,9 +282,9 @@ def query_points(host, token, device_id):
 
 
 def checkin_once(cred: dict):
-    """对单个账号执行签到，返回 (结果标记, 通知文本)。"""
+    """执行签到，返回 (结果标记, 通知文本)。"""
     host = cred["host"] or "https://api.trae.cn"
-    tag = f"{cred['name']}({cred['user_id'] or '未知ID'})"
+    tag = cred["user_id"] or "未知用户"
 
     if cred["expires_ms"]:
         remain_h = (cred["expires_ms"] - datetime.now(timezone.utc).timestamp() * 1000) / 3600000
@@ -329,15 +322,14 @@ def checkin_once(cred: dict):
 
 def export_env():
     """--export-env：从本机登录态解密并打印环境变量（供青龙/跨机部署拷贝）。"""
-    accounts = scan_accounts()
-    if not accounts:
+    c = read_local_credential()
+    if not c:
         print("未发现 Trae 登录态，请先在本机登录 Trae 桌面端")
         return 1
-    c = accounts[0]
     print(f"TRAE_TOKEN={c['token']}")
     print(f"TRAE_DEVICE_ID={c['device_id']}")
     print(f"TRAE_HOST={c['host'] or 'https://api.trae.cn'}")
-    print(f"# 账号: {c['name']} (userId={c['user_id']})")
+    print(f"TRAE_USER_ID={c['user_id']}")
     if c["expires_ms"]:
         exp = datetime.fromtimestamp(c["expires_ms"] / 1000, tz=timezone.utc)
         print(f"# token 过期时间(UTC): {exp:%Y-%m-%d %H:%M}")
@@ -349,21 +341,14 @@ def main():
     if "--export-env" in sys.argv:
         sys.exit(export_env())
 
-    accounts = resolve_credentials()
-    results = []
-    for cred in accounts:
-        flag, text = checkin_once(cred)
-        print(f"[checkin] RESULT={flag} | {text}")
-        results.append(text)
-
     title = "Trae Work 每日签到"
-    if not results:
-        content = "未获取到 Trae 登录态，请登录 Trae 桌面端后重试"
-        print("RESULT=NO_CREDENTIAL")
+    cred = resolve_credentials()
+    if not cred:
+        flag, content = "NO_CREDENTIAL", "未获取到 Trae 登录态，请登录 Trae 桌面端后重试"
     else:
-        ok = sum(1 for t in results if t.startswith(("✅", "ℹ️")))
-        content = "\n".join(results)
-        print(f"RESULT=DONE success_or_already={ok}/{len(results)}")
+        flag, content = checkin_once(cred)
+
+    print(f"RESULT={flag} | {content}")
 
     if _HAS_NOTIFY:
         try:
