@@ -1,7 +1,7 @@
 #!/bin/env python3
 # -*- coding: utf-8 -*
 """
-cron: 12 0 * * * trae_checkin.py
+cron: 23 8 * * * trae_checkin.py
 new Env('TraeWork每日积分签到');
 
 ==================== Trae Work 自动签到（参考 luckymiaow/trae-mate 重写） ====================
@@ -206,8 +206,8 @@ def resolve_credentials():
 
 AUTH_FAIL_KEYWORDS = ("unauthorized", "token", "expired", "not login",
                       "not logged", "登录", "鉴权")
-RATE_LIMIT_KEYWORDS = ("频繁", "frequent", "too many")
-
+RATE_LIMIT_KEYWORDS = ("频繁", "frequent", "too many", "太多", "稍后再试",
+                       "繁忙", "busy")
 
 def api_succeeded(data: dict) -> bool:
     if not isinstance(data, dict):
@@ -239,10 +239,27 @@ def is_auth_failure(http_status: int, data) -> bool:
     return any(k.lower() in msg for k in AUTH_FAIL_KEYWORDS)
 
 
+def is_rate_limited(http_status: int, data) -> bool:
+    """服务端活动限流：HTTP 429/5xx 或业务消息命中限频关键词。"""
+    if http_status in (429, 500, 502, 503, 504):
+        return True
+    if not isinstance(data, dict):
+        return False
+    msg = str(data.get("message") or data.get("msg") or "")
+    return any(k in msg for k in RATE_LIMIT_KEYWORDS)
+
+
+# 请求头 User-Agent：对齐真实 Trae 桌面端（Chromium/Electron 内核）。
+# 高峰期服务端对 python-requests 等非浏览器 UA 限流更严格，统一用浏览器 UA。
+USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+
 def api_call(host, token, device_id, path, body=None, timeout=30):
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
+        "User-Agent": USER_AGENT,
         "Authorization": f"Cloud-IDE-JWT {token}",
     }
     if device_id:
@@ -282,7 +299,7 @@ def query_points(host, token, device_id):
 
 
 def checkin_once(cred: dict):
-    """执行签到，返回 (结果标记, 通知文本)。"""
+    """执行单次签到，返回 (结果标记, 通知文本)。不做重试：结果如实上报。"""
     host = cred["host"] or "https://api.trae.cn"
     tag = cred["user_id"] or "未知用户"
 
@@ -301,6 +318,8 @@ def checkin_once(cred: dict):
         return "AUTH_EXPIRED", f"⚠️ {tag} 鉴权失败（HTTP {sc}），请打开 Trae 桌面端刷新登录态后重试"
     if not api_succeeded(sb):
         msg = (sb or {}).get("message") or (sb or {}).get("msg") or json.dumps(sb, ensure_ascii=False)[:120]
+        if is_rate_limited(sc, sb):
+            return "RATE_LIMITED", f"⏳ {tag} 服务端限频：{msg}，请稍后手动再跑一次"
         return "STATUS_ERR", f"⚠️ {tag} 状态查询异常：HTTP {sc} {msg}"
 
     # 2) 领取
@@ -317,6 +336,8 @@ def checkin_once(cred: dict):
         return "SUCCESS", f"✅ {tag} {gain}{extra}"
 
     msg = (cb or {}).get("message") or (cb or {}).get("msg") or json.dumps(cb, ensure_ascii=False)[:150]
+    if is_rate_limited(cc, cb):
+        return "RATE_LIMITED", f"⏳ {tag} 服务端限频：{msg}，请稍后手动再跑一次"
     return "FAIL", f"⚠️ {tag} 签到未成功：HTTP {cc} {msg}"
 
 
