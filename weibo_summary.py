@@ -6,11 +6,16 @@ new Env('微博热搜');
 """
 from collections import Counter
 from urllib.parse import quote
+import os
+from dotenv import load_dotenv
 import requests
 import sendNotify
 import jieba.analyse
 import sqlite3
 from datetime import datetime
+from bs4 import BeautifulSoup
+
+load_dotenv()  # 让 WEIBO_COOKIE 等环境变量从 .env 读取（不会覆盖已有 os.environ）
 
 summary_list = []
 conn = sqlite3.connect('wb.db')
@@ -26,8 +31,7 @@ cursor.execute('''
 
 def filter_item(realtime_item):
     title = realtime_item.get('title')
-    # TODO state
-    state = ""
+    state = realtime_item.get('state', "")
     for row in get_db_data():
         if title == row[1]:
             if state == row[2]:
@@ -185,53 +189,75 @@ def filter_item(realtime_item):
     summary_list.append(item)
 
 
+# 热搜 flag（新/热/爆）对应的官方角标图片，参考 newsnow 的 weibo 源
+FLAG_ICONS = {
+    "新": "https://simg.s.weibo.com/moter/flags/1_0.png",
+    "热": "https://simg.s.weibo.com/moter/flags/2_0.png",
+    "爆": "https://simg.s.weibo.com/moter/flags/4_0.png",
+}
+
+
 def get_hot_search():
-    url = "https://m.weibo.cn/api/container/getIndex?containerid=106003type%3D25%26t%3D3%26disable_hot%3D1%26filter_type%3Drealtimehot&title=%E5%BE%AE%E5%8D%9A%E7%83%AD%E6%90%9C&extparam=filter_type%3Drealtimehot%26mi_cid%3D100103%26pos%3D0_0%26c_type%3D30%26display_time%3D1540538388&luicode=10000011&lfid=231583"
+    """参照 newsnow 的微博源：直接抓取 s.weibo.com 热搜榜 HTML。
+    旧的 m.weibo.cn JSON 接口（containerid=realtimehot）已不稳定/需登录，故改用 HTML 解析。
+    """
+    baseurl = "https://s.weibo.com"
+    url = f"{baseurl}/top/summary?cate=realtimehot"
+
     headers = {
-        "referer": "https://s.weibo.com/top/summary?cate=realtimehot",
-        "mweibo-pwa": "1",
-        "x-requested-with": "XMLHttpRequest",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+        "referer": url,
+        # 热搜页需要登录态。可把带 SUB 的 Cookie 配到环境变量 WEIBO_COOKIE；
+        # 留空时回退到 newsnow 的公开 Cookie（可能随时失效，建议自备）。
+        "Cookie": os.getenv(
+            "WEIBO_COOKIE",
+            "_2AkMWIuNSf8NxqwJRmP8dy2rhaoV2ygrEieKgfhKJJRMxHRl-yT9jqk86tRB6PaLNvQZR6zYUcYVT1zSjoSreQHidcUq7",
+        ),
     }
-    resp = requests.get(url, headers=headers)
-    resp.encoding = 'utf-8'
 
     try:
-        data = resp.json()
-        cards = data['data']['cards'][0]['card_group']
-    except (KeyError, IndexError, requests.exceptions.JSONDecodeError) as e:
-        print(f"解析错误: {e}")
-        print(resp.json())
+        resp = requests.get(url, headers=headers, timeout=15)
+        resp.encoding = "utf-8"
+        resp.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        print(f"请求热搜页失败: {e}")
         return []
 
-    result = []
-    for i, k in enumerate(cards):
-        if i == 0:
+    soup = BeautifulSoup(resp.text, "html.parser")
+    rows = soup.select("#pl_top_realtimehot table tbody tr")[1:]  # 第一行是表头，跳过
+
+    if not rows:
+        if "Sina Visitor System" in resp.text or "visitor" in resp.text.lower():
+            print("⚠️ 返回的是微博访客验证页：缺少有效 Cookie。"
+                  "请设置环境变量 WEIBO_COOKIE（值为带 SUB= 的登录态，从浏览器 F12 复制），否则热搜页无法读取。")
+        else:
+            print("⚠️ 未解析到热搜列表，页面结构可能已变化。")
+        return []
+
+    for row in rows:
+        link = row.select_one("td.td-02 a")
+        if not link:
             continue
-        if not k.get('desc'):
+        href = link.get("href", "") or ""
+        if not href or "javascript:void(0)" in href:
+            continue
+        title = link.get_text(strip=True)
+        if not title:
             continue
 
-        actionlog = k.get('actionlog', {})
-        if actionlog and 'ext' in actionlog and "ads_word" in actionlog['ext']:
-            continue
-
-        # 手动URL编码
-        query = k['desc'].replace(' ', '%20').replace('#', '%23').replace('&', '%26')
+        flag_tag = row.select_one("td.td-03")
+        flag = flag_tag.get_text(strip=True) if flag_tag else ""
+        icon_url = FLAG_ICONS.get(flag)
+        state = flag  # 新/热/爆，参与去重与展示
 
         item = {
-            'id': k['desc'],
-            'title': k['desc'],
-            'extra': {'icon': None},
-            'url': f"https://s.weibo.com/weibo?q=%23{query}%23",  # 手动添加 # 的编码 %23
-            'mobileUrl': k.get('scheme')
+            'id': title,
+            'title': title,
+            'state': state,
+            'extra': {'icon': {'url': icon_url, 'scale': 1.5} if icon_url else None},
+            'url': f"{baseurl}{href}",
+            'mobileUrl': f"{baseurl}{href}",
         }
-
-        # TODO state
-        if k.get('icon'):
-            item['extra']['icon'] = {
-                'url': k['icon'],
-                'scale': 1.5
-            }
-        result.append(item)
         filter_item(item)
 
 
