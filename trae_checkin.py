@@ -53,6 +53,13 @@ from datetime import datetime, timezone
 
 import requests
 
+# 本地开发时自动加载同目录 .env；已设置的环境变量优先，不受影响
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+except ImportError:
+    pass
+
 try:
     from Crypto.Cipher import AES
 except ImportError:
@@ -118,7 +125,7 @@ def decrypt_trae_auth_info(encoded: str) -> dict:
 
 
 def parse_time_ms(value) -> float:
-    """expiredAt 可能是 RFC3339/ISO 字符串或毫秒数字，统一转毫秒时间戳。"""
+    """expiredAt 可能是 RFC3339/ISO 字符串或毫秒数字，统一转毫秒时间戳；无法解析返回 0。"""
     if value is None:
         return 0
     if isinstance(value, (int, float)):
@@ -126,14 +133,17 @@ def parse_time_ms(value) -> float:
     s = str(value).strip()
     if s.isdigit():
         return float(s)
-    for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S"):
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z",
+                "%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
         try:
-            return datetime.strptime(s.replace("+00:00", "Z"), fmt.replace("%fZ", "Z") if ".%f" in fmt else fmt) \
-                .replace(tzinfo=timezone.utc).timestamp() * 1000
+            dt = datetime.strptime(s, fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp() * 1000
         except ValueError:
             continue
     try:
-        return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp() * 1000
+        return datetime.fromisoformat(s).timestamp() * 1000
     except ValueError:
         return 0
 
@@ -236,7 +246,7 @@ def is_auth_failure(http_status: int, data) -> bool:
     return any(k.lower() in msg for k in AUTH_FAIL_KEYWORDS)
 
 
-def api_call(host, token, device_id, path, method="POST", body=None, timeout=30):
+def api_call(host, token, device_id, path, body=None, timeout=30):
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
@@ -246,11 +256,8 @@ def api_call(host, token, device_id, path, method="POST", body=None, timeout=30)
         headers["x-device-id"] = device_id
     url = f"{host}{path}"
     try:
-        if method == "GET":
-            r = requests.get(url, headers=headers, timeout=timeout)
-        else:
-            r = requests.post(url, headers=headers,
-                              data=json.dumps(body or {}), timeout=timeout)
+        r = requests.post(url, headers=headers,
+                          data=json.dumps(body or {}), timeout=timeout)
         try:
             return r.status_code, r.json()
         except Exception:
@@ -262,7 +269,7 @@ def api_call(host, token, device_id, path, method="POST", body=None, timeout=30)
 def query_points(host, token, device_id):
     """查询剩余积分（entitlement_list 结构化解析，失败则忽略）。"""
     sc, sb = api_call(host, token, device_id, ENTITLEMENT_PATH,
-                      method="POST", body={"require_usage": True}, timeout=15)
+                      body={"require_usage": True}, timeout=15)
     try:
         packs = (((sb or {}).get("data") or {}).get("user_entitlement_pack_list")) or []
         total = 0
@@ -308,12 +315,13 @@ def checkin_once(cred: dict):
     if is_auth_failure(cc, cb):
         return "AUTH_EXPIRED", f"⚠️ {tag} 鉴权失败（HTTP {cc}），请打开 Trae 桌面端刷新登录态后重试"
     if api_succeeded(cb):
-        points = ((cb.get("data") or {}).get("points")) or cb.get("points") or 200
+        points = ((cb.get("data") or {}).get("points")) or cb.get("points")
         message = cb.get("message") or cb.get("msg") or ""
         pts = query_points(host, cred["token"], cred["device_id"])
         extra = f"，剩余积分 {pts}" if pts is not None else ""
         text = "签到成功" if message == "success" else message
-        return "SUCCESS", f"✅ {tag} {text}，本次 +{points} 积分{extra}"
+        gain = f"本次 +{points} 积分" if points else text
+        return "SUCCESS", f"✅ {tag} {gain}{extra}"
 
     msg = (cb or {}).get("message") or (cb or {}).get("msg") or json.dumps(cb, ensure_ascii=False)[:150]
     return "FAIL", f"⚠️ {tag} 签到未成功：HTTP {cc} {msg}"
@@ -357,14 +365,11 @@ def main():
         content = "\n".join(results)
         print(f"RESULT=DONE success_or_already={ok}/{len(results)}")
 
-    if _HAS_NOTIFY and results:
+    if _HAS_NOTIFY:
         try:
-            sendNotify.send(title, content)
-        except Exception:
-            try:
-                sendNotify.serverJMy(title, content)
-            except Exception as e:
-                print(f"[warn] 通知发送失败: {e}")
+            sendNotify.serverJMy(title, content)
+        except Exception as e:
+            print(f"[warn] 通知发送失败: {e}")
 
 
 if __name__ == "__main__":
