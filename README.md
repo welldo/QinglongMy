@@ -18,6 +18,7 @@
 * [xb](xb.py) 全网羊毛线报精选，使用 gemini-3-flash-preview 模型进行内容分析
 * [douban_spider](douban_spider.py) 豆瓣小组（上海租房版demo）
 * [workbuddy_checkin](workbuddy_checkin.py) WorkBuddy 每日积分自动签到（100积分/天，连续第7天1000积分），自动读取本机登录态，幂等可重复运行
+* [trae_checkin](trae_checkin.py) Trae Work 每日积分自动签到，自动解密本机 Trae 桌面端登录态（AES-128-CBC 信封），`--export-env` 可导出环境变量供青龙部署
 
 ## 安装依赖库
 
@@ -77,6 +78,13 @@ export WB_ACCESS_TOKEN=
 export WB_USER_ID=
 # 可选：domain 一般留空自动读取
 export WB_DOMAIN=
+
+## Trae Work 每日签到（trae_checkin.py）
+# 留空时自动解密本机 Trae 桌面端登录态（%APPDATA%\TRAE SOLO CN\User\globalStorage\storage.json）
+# 跨机/容器部署时，在本机执行 `python trae_checkin.py --export-env` 导出后填入（token 约10天过期，需重新导出）
+export TRAE_TOKEN=
+export TRAE_DEVICE_ID=
+export TRAE_HOST=
    ```
 
 若没有使用load_dotenv()，所有新增PUSH_KEY需要在[sendNotify](sendNotify.py)的push_config中配置key名称后才能生效
