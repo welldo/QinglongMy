@@ -74,8 +74,11 @@ export WB_USER_ID=
 export WB_DOMAIN=
 
 ## Trae Work 每日签到（trae_checkin.py）
-# 留空时自动解密本机 Trae 桌面端登录态（%APPDATA%\TRAE SOLO CN\User\globalStorage\storage.json）
-# 跨机/容器部署时，在本机执行 `python trae_checkin.py --export-env` 导出后填入（token 约10天过期，需重新导出）
+# 留空时自动解密本机 Trae 桌面端登录态并提取数字设备 id（%APPDATA%\TRAE SOLO CN\User\globalStorage\storage.json）
+#   - 设备 id 取 storage.json 中 iCubeAuthInfo://icube-dc:<numeric> 键的数字部分；服务端按注册指纹校验 device id，
+#     UUID 格式的 telemetry.devDeviceId 不被识别为注册设备，会触发更严格限流（sign 接口 code 9074）
+#   - 跨机/容器部署时，在本机执行 `python trae_checkin.py --export-env` 导出后填入
+#     （token 约10天过期需重新导出；设备 id 已自动导出为正确的数字值，切勿填 UUID）
 export TRAE_TOKEN=
 export TRAE_DEVICE_ID=
 export TRAE_HOST=

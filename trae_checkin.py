@@ -1,7 +1,7 @@
 #!/bin/env python3
 # -*- coding: utf-8 -*
 """
-cron: 23 8 * * * trae_checkin.py
+cron: 23 0 * * * trae_checkin.py
 new Env('TraeWork每日积分签到');
 
 ==================== Trae Work 自动签到（参考 luckymiaow/trae-mate 重写） ====================
@@ -10,10 +10,10 @@ new Env('TraeWork每日积分签到');
     状态查询  {host}/trae/api/v2/ug/checkin_credits/status
     领取积分  {host}/trae/api/v2/ug/checkin_credits/claim
 
-鉴权头：
+鉴权头（对齐逆向仓库 traeClient.ts#postUg 最小集）：
     Content-Type:   application/json
     Authorization:  Cloud-IDE-JWT {token}
-    x-device-id:    {deviceId}
+    x-device-id:    {数字格式设备id}   # 取自 storage.json 的 iCubeAuthInfo://icube-dc:<numeric> 键
 
 【方式一 · 推荐，免维护，默认生效】
 不填环境变量，脚本自动读取本机已登录的 Trae 桌面端登录态并解密：
@@ -34,7 +34,7 @@ new Env('TraeWork每日积分签到');
 【方式二 · 手动环境变量（跨机/容器部署）】
     在本机执行 python trae_checkin.py --export-env 可一键导出以下变量：
     TRAE_TOKEN=<auth_info.token>
-    TRAE_DEVICE_ID=<telemetry.devDeviceId>
+    TRAE_DEVICE_ID=<iCubeAuthInfo://icube-dc:<numeric> 键中的数字设备id>
     TRAE_HOST=<auth_info.host>        # 如 https://api.trae.cn，可选
 
 依赖：pip install requests pycryptodome
@@ -148,6 +148,27 @@ def parse_time_ms(value) -> float:
         return 0
 
 
+def extract_dc_device_id(storage: dict) -> str:
+    """从 storage.json 的 iCubeAuthInfo://icube-dc:<did> 键提取真实设备 id。
+
+    逆向仓库（BlueChonk/trae-credential-reverse-engineering）证明：服务端校验的
+    x-device-id 即此 <did>，为数字格式（如 1448485154478571 / 2417165752872746），
+    与 iCubeAuthInfo://icube-dc:<numeric> 键对应；UUID 格式的 telemetry.devDeviceId
+    不被服务端识别为注册设备，可能触发更严格的限流。优先取纯数字 <did>。
+    """
+    cands = []
+    for k in storage.keys():
+        if k.startswith("iCubeAuthInfo://icube-dc:"):
+            did = k.split(":", 3)[-1]  # iCubeAuthInfo://icube-dc:<did> 的 did 部分
+            cands.append(did)
+    numeric = [d for d in cands if d.isdigit()]
+    if numeric:
+        return numeric[0]
+    if cands:
+        return cands[0]
+    return ""
+
+
 def read_local_credential():
     """读取主实例 %APPDATA%\\TRAE SOLO CN 登录态，返回凭据 dict 或 None。"""
     appdata = os.environ.get("APPDATA", "")
@@ -166,9 +187,11 @@ def read_local_credential():
         token = (auth.get("token") or "").strip()
         if not token:
             return None
+        # 真实设备 id：优先 iCubeAuthInfo://icube-dc:<numeric> 键，回退到 telemetry.devDeviceId
+        device_id = extract_dc_device_id(storage) or (storage.get("telemetry.devDeviceId") or "").strip()
         return {
             "token": token,
-            "device_id": (storage.get("telemetry.devDeviceId") or "").strip(),
+            "device_id": device_id,
             "user_id": str(auth.get("userId") or ""),
             "host": (auth.get("host") or "").rstrip("/"),
             "expires_ms": parse_time_ms(auth.get("expiredAt")),
@@ -249,37 +272,77 @@ def is_rate_limited(http_status: int, data) -> bool:
     return any(k in msg for k in RATE_LIMIT_KEYWORDS)
 
 
-# 请求头 User-Agent：对齐真实 Trae 桌面端（Chromium/Electron 内核）。
-# 高峰期服务端对 python-requests 等非浏览器 UA 限流更严格，统一用浏览器 UA。
-USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-              "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-
-
-def api_call(host, token, device_id, path, body=None, timeout=30):
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "User-Agent": USER_AGENT,
-        "Authorization": f"Cloud-IDE-JWT {token}",
+# 请求头：对齐逆向仓库 BlueChonk/trae-credential-reverse-engineering 中
+# traeClient.ts#postUg 的实测最小集（checkin_status / checkin_claim 仅发这 3 个头）：
+#   - Content-Type:    application/json
+#   - Authorization:   Cloud-IDE-JWT <token>
+#   - x-device-id:     <数字格式设备 id，取自 iCubeAuthInfo://icube-dc:<numeric> 键>
+# 逆向证明该端点的服务端校验只认这 3 个头；附加 UA / 多余 x-* 头反而偏离真机。
+def build_checkin_headers(token: str, device_id: str, user_id: str = "") -> dict:
+    """签到/状态/积分接口共用的请求头，对齐逆向仓库 postUg 的最小集。"""
+    return {
+        "content-type": "application/json",
+        "authorization": token if str(token).startswith("Cloud-IDE-JWT ")
+                          else f"Cloud-IDE-JWT {token}",
+        "x-device-id": device_id or "",
     }
-    if device_id:
-        headers["x-device-id"] = device_id
+
+
+def api_call(host, token, device_id, path, body=None, timeout=30, user_id=""):
+    # 对齐真实 Trae 桌面端完整请求头（含 VSCode UA + x-market-user-id + vscode-sessionid 等）
+    headers = build_checkin_headers(token, device_id, user_id)
     url = f"{host}{path}"
+    req_body = json.dumps(body or {})
+
+    # 打印完整请求信息
+    print(f"\n{'='*60}")
+    print(f"[REQUEST] POST {url}")
+    print(f"[REQUEST] Headers:")
+    for k, v in headers.items():
+        if k == "Authorization":
+            print(f"  {k}: Cloud-IDE-JWT {v[len('Cloud-IDE-JWT '):len('Cloud-IDE-JWT ')+20]}...")
+        else:
+            print(f"  {k}: {v}")
+    print(f"[REQUEST] Body: {req_body}")
+
     try:
-        r = requests.post(url, headers=headers,
-                          data=json.dumps(body or {}), timeout=timeout)
+        # 用 PreparedRequest 精确控制最终发出的 header，避免 requests 自动注入多余默认值
+        req = requests.Request("POST", url, headers=headers, data=req_body)
+        prepared = req.prepare()
+
+        print(f"[REQUEST] 最终发出 Headers (含库自动添加):")
+        for k, v in prepared.headers.items():
+            if k == "Authorization":
+                print(f"  {k}: Cloud-IDE-JWT {v[len('Cloud-IDE-JWT '):len('Cloud-IDE-JWT ')+20]}...")
+            else:
+                print(f"  {k}: {v}")
+
+        session = requests.Session()
+        # proxies=None 强制直连 api.trae.cn，避免走系统/本地代理导致被限频或连不上
+        r = session.send(prepared, timeout=timeout, proxies={"http": None, "https": None})
+
+        # 打印完整响应信息
+        print(f"\n[RESPONSE] Status: {r.status_code}")
+        print(f"[RESPONSE] Headers:")
+        for k, v in r.headers.items():
+            print(f"  {k}: {v}")
+        print(f"[RESPONSE] Body: {r.text[:1000]}")
+        print(f"{'='*60}\n")
+
         try:
             return r.status_code, r.json()
         except Exception:
             return r.status_code, {"raw": r.text[:300]}
     except Exception as e:
+        print(f"[RESPONSE] Error: {e}")
+        print(f"{'='*60}\n")
         return 0, {"error": str(e)}
 
 
-def query_points(host, token, device_id):
+def query_points(host, token, device_id, user_id=""):
     """查询剩余积分（entitlement_list 结构化解析，失败则忽略）。"""
     sc, sb = api_call(host, token, device_id, ENTITLEMENT_PATH,
-                      body={"require_usage": True}, timeout=15)
+                      body={"require_usage": True}, timeout=15, user_id=user_id)
     try:
         packs = (((sb or {}).get("data") or {}).get("user_entitlement_pack_list")) or []
         total = 0
@@ -309,9 +372,9 @@ def checkin_once(cred: dict):
             return "AUTH_EXPIRED", f"⚠️ {tag} token 已过期，请打开 Trae 桌面端刷新登录态后重试"
 
     # 1) 状态查询
-    sc, sb = api_call(host, cred["token"], cred["device_id"], STATUS_PATH)
+    sc, sb = api_call(host, cred["token"], cred["device_id"], STATUS_PATH, user_id=cred["user_id"])
     if isinstance(sb, dict) and sb.get("checked_in"):
-        pts = query_points(host, cred["token"], cred["device_id"])
+        pts = query_points(host, cred["token"], cred["device_id"], cred["user_id"])
         extra = f"，剩余积分 {pts}" if pts is not None else ""
         return "ALREADY_TODAY", f"ℹ️ {tag} 今日已签到{extra}"
     if is_auth_failure(sc, sb):
@@ -319,17 +382,17 @@ def checkin_once(cred: dict):
     if not api_succeeded(sb):
         msg = (sb or {}).get("message") or (sb or {}).get("msg") or json.dumps(sb, ensure_ascii=False)[:120]
         if is_rate_limited(sc, sb):
-            return "RATE_LIMITED", f"⏳ {tag} 服务端限频：{msg}，请稍后手动再跑一次"
+            return "RATE_LIMITED", f"⏳ {tag} 服务端限频（活动高峰容量不足，与请求特征无关）：{msg}，建议错峰或稍后重试"
         return "STATUS_ERR", f"⚠️ {tag} 状态查询异常：HTTP {sc} {msg}"
 
     # 2) 领取
-    cc, cb = api_call(host, cred["token"], cred["device_id"], CLAIM_PATH)
+    cc, cb = api_call(host, cred["token"], cred["device_id"], CLAIM_PATH, user_id=cred["user_id"])
     if is_auth_failure(cc, cb):
         return "AUTH_EXPIRED", f"⚠️ {tag} 鉴权失败（HTTP {cc}），请打开 Trae 桌面端刷新登录态后重试"
     if api_succeeded(cb):
         points = ((cb.get("data") or {}).get("points")) or cb.get("points")
         message = cb.get("message") or cb.get("msg") or ""
-        pts = query_points(host, cred["token"], cred["device_id"])
+        pts = query_points(host, cred["token"], cred["device_id"], cred["user_id"])
         extra = f"，剩余积分 {pts}" if pts is not None else ""
         text = "签到成功" if message == "success" else message
         gain = f"本次 +{points} 积分" if points else text
@@ -337,7 +400,7 @@ def checkin_once(cred: dict):
 
     msg = (cb or {}).get("message") or (cb or {}).get("msg") or json.dumps(cb, ensure_ascii=False)[:150]
     if is_rate_limited(cc, cb):
-        return "RATE_LIMITED", f"⏳ {tag} 服务端限频：{msg}，请稍后手动再跑一次"
+        return "RATE_LIMITED", f"⏳ {tag} 服务端限频（活动高峰容量不足，与请求特征无关）：{msg}，建议错峰或稍后重试"
     return "FAIL", f"⚠️ {tag} 签到未成功：HTTP {cc} {msg}"
 
 
