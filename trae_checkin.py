@@ -4,7 +4,7 @@
 cron: 23 0 * * * trae_checkin.py
 new Env('TraeWork每日积分签到');
 
-==================== Trae Work 自动签到（参考 luckymiaow/trae-mate 重写） ====================
+==================== Trae Work 自动签到 ====================
 
 签到点（POST，空 JSON body）：
     状态查询  {host}/trae/api/v2/ug/checkin_credits/status
@@ -73,7 +73,7 @@ try:
 except Exception:
     _HAS_NOTIFY = False
 
-# ===== 加密信封常量（源自 TRAE 客户端 / trae-mate trae_auth.rs）=====
+# ===== 加密信封常量（源自 TRAE 客户端 ）=====
 HEADER = bytes([116, 99, 5, 16, 0, 0])
 LEFT_SECRET = bytes([
     82, 9, 106, 213, 48, 54, 165, 56, 191, 64, 163, 158, 129, 243, 215, 251,
