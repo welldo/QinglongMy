@@ -19,6 +19,7 @@
 * [douban_spider](douban_spider.py) 豆瓣小组（上海租房版demo）
 * [workbuddy_checkin](workbuddy_checkin.py) WorkBuddy 每日积分自动签到（100积分/天，连续第7天1000积分），自动读取本机登录态，幂等可重复运行
 * [trae_checkin](trae_checkin.py) Trae Work 每日积分自动签到，自动解密本机 Trae 桌面端登录态（AES-128-CBC 信封），`--export-env` 可导出环境变量供青龙部署
+* [minimax_checkin](minimax_checkin.py) MiniMax Code 每日积分自动签到（400积分/天，第4、7天1000积分），自动读取本机 MiniMax Agent 桌面端登录态（JWT），逆向 `yy`/`x-signature` 签名，`--export-env` 可导出环境变量供青龙部署
 
 ## 安装依赖库
 
@@ -29,7 +30,7 @@
 ## 添加仓库
 
    ```shell
-   ql repo https://github.com/mgmg22/QinglongMy.git "summary|stock_spider|trade|epic_free_game|xb|send_qq|job" "activity|backUp" "sendNotify|stopwords|util" "main"
+   ql repo https://github.com/mgmg22/QinglongMy.git "summary|stock_spider|trade|epic_free_game|xb|send_qq|job|minimax|trae|workbuddy" "activity|backUp" "sendNotify|stopwords|util" "main"
    ```
 
 ## 推送渠道及在线测试
@@ -82,6 +83,19 @@ export WB_DOMAIN=
 export TRAE_TOKEN=
 export TRAE_DEVICE_ID=
 export TRAE_HOST=
+
+## MiniMax Code 每日签到（minimax_checkin.py）
+# 留空时自动读取本机 MiniMax Agent 桌面端登录态（%APPDATA%\MiniMax Agent\minimax-agent-config.json -> tokens.accessToken）
+#   - token 由客户端运行时刷新写回，默认跟随客户端有效（实测当前 token 有效期约至 2026-10）
+#   - 跨机/容器部署时，在本机执行 `python minimax_checkin.py --export-env` 导出后填入
+#     （token 过期后在 MiniMax Agent 客户端重新登录即可）
+export MINIMAX_TOKEN=
+export MINIMAX_USER_ID=
+# 可选：同机稳定性参数，留空时自动生成并缓存在 .minimax_device.json
+export MINIMAX_UUID=
+export MINIMAX_DEVICE_ID=
+# 可选：覆盖本机登录态配置文件路径（默认 %APPDATA%\MiniMax Agent\minimax-agent-config.json）
+export MINIMAX_CONFIG_PATH=
    ```
 
 若没有使用load_dotenv()，所有新增PUSH_KEY需要在[sendNotify](sendNotify.py)的push_config中配置key名称后才能生效
