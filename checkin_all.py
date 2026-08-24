@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*
 """
 cron: 8 0 * * * checkin_all.py
-new Env('每日签到汇总');
+new Env('每日Token签到汇总');
 
 ==================== 聚合签到（单次定时，一次推送）====================
 
@@ -99,7 +99,7 @@ def run_one(display_name, mod_name):
 
 def build_summary(results):
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    lines = [f"【每日签到汇总 · {now}】", ""]
+    lines = [f"【每日Token签到汇总 · {now}】", ""]
     ok = 0
     for name, flag, content in results:
         icon = FLAG_ICON.get(flag, "•")
@@ -132,7 +132,7 @@ def main():
     no_push = os.environ.get("CHECKIN_NO_NOTIFY", "").strip() in ("1", "true", "True")
     if _HAS_NOTIFY and not no_push:
         try:
-            sendNotify.serverJMy("每日签到汇总", summary)
+            sendNotify.serverJMy("每日Token签到汇总", summary)
         except Exception as e:
             print(f"[warn] 合并推送失败: {e}")
     elif no_push:
