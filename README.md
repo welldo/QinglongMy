@@ -20,6 +20,7 @@
 * [workbuddy_checkin](workbuddy_checkin.py) WorkBuddy 每日积分自动签到（100积分/天，连续第7天1000积分），自动读取本机登录态，幂等可重复运行
 * [trae_checkin](trae_checkin.py) Trae Work 每日积分自动签到，自动解密本机 Trae 桌面端登录态（AES-128-CBC 信封），`--export-env` 可导出环境变量供青龙部署
 * [minimax_checkin](minimax_checkin.py) MiniMax Code 每日积分自动签到（400积分/天，第4、7天1000积分），自动读取本机 MiniMax Agent 桌面端登录态（JWT），逆向 `yy`/`x-signature` 签名，`--export-env` 可导出环境变量供青龙部署
+* [checkin_all](checkin_all.py) 聚合签到（推荐）：**只需设一个定时**，依次跑 WorkBuddy / Trae Work / MiniMax Code 三个签到，合并结果后**只发一次推送**。各子脚本的单独定时可停用/删除
 
 ## 安装依赖库
 
@@ -30,7 +31,7 @@
 ## 添加仓库
 
    ```shell
-   ql repo https://github.com/mgmg22/QinglongMy.git "summary|stock_spider|trade|epic_free_game|xb|send_qq|job|minimax|trae|workbuddy" "activity|backUp" "sendNotify|stopwords|util" "main"
+   ql repo https://github.com/mgmg22/QinglongMy.git "summary|stock_spider|trade|epic_free_game|xb|send_qq|job|checkin" "activity|backUp" "sendNotify|stopwords|util" "main"
    ```
 
 ## 推送渠道及在线测试

@@ -1,8 +1,8 @@
 #!/bin/env python3
 # -*- coding: utf-8 -*
 """
-cron: 9 0 * * * workbuddy_checkin.py
-new Env('WorkBuddy每日积分签到');
+# cron: 9 0 * * * workbuddy_checkin.py
+# new Env('WorkBuddy每日积分签到');
 
 ==================== 如何获取 WB_ACCESS_TOKEN / WB_USER_ID ====================
 
@@ -46,7 +46,6 @@ new Env('WorkBuddy每日积分签到');
 """
 
 import os
-import sys
 import json
 import platform
 import requests
@@ -90,7 +89,7 @@ def resolve_credentials():
     domain = os.environ.get("WB_DOMAIN", "").strip()
 
     if token and uid:
-        return token, uid, domain, "env"
+        return {"token": token, "uid": uid, "domain": domain, "src": "env"}
 
     for f in _local_info_candidates():
         if not os.path.isfile(f):
@@ -104,10 +103,10 @@ def resolve_credentials():
             uid = str(acct.get("uid", "") or "")
             domain = str(auth.get("domain", "") or "")
             if token and uid:
-                return token, uid, domain, "local"
+                return {"token": token, "uid": uid, "domain": domain, "src": "local"}
         except Exception as e:
             print(f"[warn] 读取本地登录态失败 {f}: {e}")
-    return "", "", "", "none"
+    return {"token": "", "uid": "", "domain": "", "src": "none"}
 
 
 def _call(token, uid, domain, path):
@@ -129,15 +128,17 @@ def _call(token, uid, domain, path):
         return 0, {"error": str(e)}
 
 
-def main():
-    token, uid, domain, src = resolve_credentials()
+def checkin_once(cred):
+    """执行单次签到，返回 (结果标记, 通知文本)。不做重试：结果如实上报。"""
+    cred = cred or {}
+    token = cred.get("token", "")
+    uid = cred.get("uid", "")
+    domain = cred.get("domain", "")
+    src = cred.get("src", "")
+
     if not token or not uid:
-        msg = ("未获取到 WorkBuddy 登录态：请设置环境变量 WB_ACCESS_TOKEN / WB_USER_ID，"
-               "或确保本机已登录 WorkBuddy 桌面端（v5.3.8+）。")
-        print(msg)
-        if _HAS_NOTIFY:
-            sendNotify.send("WorkBuddy 签到失败", msg)
-        return
+        return "NO_CREDENTIAL", ("未获取到 WorkBuddy 登录态：请设置环境变量 WB_ACCESS_TOKEN / WB_USER_ID，"
+                                 "或确保本机已登录 WorkBuddy 桌面端（v5.3.8+）。")
 
     print(f"[info] 凭据来源={src} uid={uid} domain={domain or '-'}")
 
@@ -149,32 +150,30 @@ def main():
     cc, cb = _call(token, uid, domain, CHECKIN_PATH)
     print(f"[checkin] HTTP {cc} -> {json.dumps(cb, ensure_ascii=False)[:300]}")
 
-    title = "WorkBuddy 每日签到"
     if cc == 0:
         content = f"⚠️ 网络异常，签到请求未发出：{json.dumps(cb, ensure_ascii=False)[:200]}"
-        print("RESULT=NET_ERR")
-    elif isinstance(cb, dict):
+        return "NET_ERR", content
+    if isinstance(cb, dict):
         code = cb.get("code")
         if code == 0:
             d = cb.get("data", {})
             content = (f"✅ 领取成功\n- 本次积分：{d.get('credit')}\n"
                        f"- 连续签到：第 {d.get('streak_days')} 天")
-            print("RESULT=SUCCESS credit=%s streak_days=%s" % (d.get('credit'), d.get('streak_days')))
-        elif code == 10001:
-            content = "ℹ️ 今日已签到，无需重复领取"
-            print("RESULT=ALREADY_TODAY")
-        elif cc in (401, 403):
-            content = f"⚠️ 令牌失效（HTTP {cc}），请打开 WorkBuddy 桌面端刷新登录态后重试"
-            print("RESULT=TOKEN_EXPIRED")
-        else:
-            content = f"⚠️ 签到未成功：HTTP {cc} code={code} msg={cb.get('msg')}"
-            print("RESULT=FAIL code=%s msg=%s" % (code, cb.get('msg')))
-    else:
-        content = f"⚠️ 请求异常（HTTP {cc}）：{json.dumps(cb, ensure_ascii=False)[:200]}"
-        print("RESULT=HTTP_ERR code=%s" % cc)
+            return "SUCCESS", content
+        if code == 10001:
+            return "ALREADY_TODAY", "ℹ️ 今日已签到，无需重复领取"
+        if cc in (401, 403):
+            return "TOKEN_EXPIRED", f"⚠️ 令牌失效（HTTP {cc}），请打开 WorkBuddy 桌面端刷新登录态后重试"
+        return "FAIL", f"⚠️ 签到未成功：HTTP {cc} code={code} msg={cb.get('msg')}"
+    return "HTTP_ERR", f"⚠️ 请求异常（HTTP {cc}）：{json.dumps(cb, ensure_ascii=False)[:200]}"
 
+
+def main():
+    cred = resolve_credentials()
+    flag, content = checkin_once(cred)
+    print(f"RESULT={flag} | {content}")
     if _HAS_NOTIFY:
-        sendNotify.serverJMy(title, content)
+        sendNotify.serverJMy("WorkBuddy 每日签到", content)
 
 
 if __name__ == '__main__':

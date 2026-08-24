@@ -1,8 +1,8 @@
 #!/bin/env python3
 # -*- coding: utf-8 -*
 """
-cron: 33 0 * * * minimax_checkin.py
-new Env('MiniMax Code 每日签到');
+# cron: 33 0 * * * minimax_checkin.py
+# new Env('MiniMax Code 每日签到');
 
 ==================== MiniMax Code 自动签到 ====================
 

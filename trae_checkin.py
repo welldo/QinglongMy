@@ -1,8 +1,8 @@
 #!/bin/env python3
 # -*- coding: utf-8 -*
 """
-cron: 23 0 * * * trae_checkin.py
-new Env('TraeWork每日积分签到');
+# cron: 23 0 * * * trae_checkin.py
+# new Env('TraeWork每日积分签到');
 
 ==================== Trae Work 自动签到 ====================
 
