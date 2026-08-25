@@ -13,7 +13,6 @@
 在 .env 或运行环境中设置：
         WB_ACCESS_TOKEN=<auth.accessToken 的值>
         WB_USER_ID=<account.uid 的值>
-        WB_DOMAIN=<auth.domain，可选>
 
     脚本【默认只读取上述环境变量】，不再自动读取本机登录态，
     方便容器 / 跨机 / 青龙部署：凭据完全由环境变量决定，行为可预期。
@@ -120,7 +119,6 @@ def resolve_credentials():
     return {
         "token": os.environ.get("WB_ACCESS_TOKEN", "").strip(),
         "uid": os.environ.get("WB_USER_ID", "").strip(),
-        "domain": os.environ.get("WB_DOMAIN", "").strip(),
     }
 
 
@@ -136,9 +134,8 @@ def read_local_credential():
             acct = j.get("account") or {}
             auth = j.get("auth") or {}
             uid = str(acct.get("uid", "") or "")
-            domain = str(auth.get("domain", "") or "")
             if token and uid:
-                return {"token": token, "uid": uid, "domain": domain}
+                return {"token": token, "uid": uid}
         except Exception as e:
             print(f"[warn] 读取本地登录态失败 {f}: {e}")
     return None
@@ -153,12 +150,9 @@ def export_env():
     values = {
         "WB_ACCESS_TOKEN": c["token"],
         "WB_USER_ID": c["uid"],
-        "WB_DOMAIN": c["domain"],
     }
     print(f"WB_ACCESS_TOKEN={c['token']}")
     print(f"WB_USER_ID={c['uid']}")
-    if c["domain"]:
-        print(f"WB_DOMAIN={c['domain']}")
     if "--save" in sys.argv:
         n = _save_env_values(values)
         if n:
@@ -166,15 +160,13 @@ def export_env():
     return 0
 
 
-def _call(token, uid, domain, path):
+def _call(token, uid, path):
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
         "Authorization": f"Bearer {token}",
         "X-User-Id": uid,
     }
-    if domain:
-        headers["X-Domain"] = domain
     try:
         r = requests.post(API_BASE + path, headers=headers, data="{}", timeout=15)
         try:
@@ -190,17 +182,16 @@ def checkin_once(cred):
     cred = cred or {}
     token = cred.get("token", "")
     uid = cred.get("uid", "")
-    domain = cred.get("domain", "")
 
     if not token or not uid:
         return "NO_CREDENTIAL", ("未获取到 WorkBuddy 登录态，请设置环境变量 WB_ACCESS_TOKEN / WB_USER_ID"
                                  "（或运行 python workbuddy_checkin.py --export-env --save 刷新）")
 
     # 查询状态（仅参考，today_checked_in 不可靠）
-    sc, sb = _call(token, uid, domain, STATUS_PATH)
+    sc, sb = _call(token, uid, STATUS_PATH)
 
     # 执行领取（幂等：code=10001 表示今日已签）
-    cc, cb = _call(token, uid, domain, CHECKIN_PATH)
+    cc, cb = _call(token, uid, CHECKIN_PATH)
 
     if cc == 0:
         content = f"⚠️ 网络异常，签到请求未发出：{json.dumps(cb, ensure_ascii=False)[:200]}"

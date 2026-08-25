@@ -19,7 +19,6 @@
 在 .env 或运行环境中设置：
     TRAE_TOKEN=<auth_info.token>
     TRAE_DEVICE_ID=<iCubeAuthInfo://icube-dc:<numeric> 键中的数字设备id>
-    TRAE_HOST=<auth_info.host>               # 如 https://api.trae.cn，可选
     TRAE_USER_ID=<auth_info.userId>           # 可选，仅用于展示
 脚本【默认只读取上述环境变量】，不再自动读取本机登录态，方便容器 / 跨机 / 青龙部署。
 
@@ -120,6 +119,7 @@ RIGHT_SECRET = bytes([
 STATUS_PATH = "/trae/api/v2/ug/checkin_credits/status"
 CLAIM_PATH = "/trae/api/v2/ug/checkin_credits/claim"
 ENTITLEMENT_PATH = "/trae/api/v2/pay/user_current_entitlement_list"
+HOST = "https://api.trae.cn"
 STORAGE_REL = os.path.join("User", "globalStorage", "storage.json")
 AUTH_KEY = "iCubeAuthInfo://icube.cloudide"
 
@@ -222,7 +222,6 @@ def read_local_credential():
             "token": token,
             "device_id": device_id,
             "user_id": str(auth.get("userId") or ""),
-            "host": (auth.get("host") or "").rstrip("/"),
             "expires_ms": parse_time_ms(auth.get("expiredAt")),
         }
     except Exception as e:
@@ -237,7 +236,6 @@ def resolve_credentials():
     return {
         "token": os.environ.get("TRAE_TOKEN", "").strip(),
         "device_id": os.environ.get("TRAE_DEVICE_ID", "").strip(),
-        "host": os.environ.get("TRAE_HOST", "").strip().rstrip("/"),
         "user_id": os.environ.get("TRAE_USER_ID", "").strip(),
         "expires_ms": 0,
     }
@@ -366,7 +364,7 @@ def checkin_once(cred: dict):
     if not token:
         return "NO_CREDENTIAL", "未获取到 Trae 登录态，请设置环境变量 TRAE_TOKEN / TRAE_DEVICE_ID（或运行 python trae_checkin.py --export-env --save 刷新）"
 
-    host = cred.get("host") or "https://api.trae.cn"
+    host = HOST
     tag = cred.get("user_id") or "未知用户"
     device_id = cred.get("device_id", "")
 
@@ -418,7 +416,6 @@ def export_env():
     values = {
         "TRAE_TOKEN": c["token"],
         "TRAE_DEVICE_ID": c["device_id"],
-        "TRAE_HOST": c["host"] or "https://api.trae.cn",
         "TRAE_USER_ID": c["user_id"],
     }
     for k, v in values.items():

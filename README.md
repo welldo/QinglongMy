@@ -69,27 +69,24 @@ export API_KEY=
 export API_URL=
 
 ## WorkBuddy 每日签到（workbuddy_checkin.py）
-# 脚本【默认只读取以下环境变量】，不再自动读取本机登录态
+# 脚本【默认只读取以下环境变量】，不自动读取本机登录态
 # token 过期时，在本机（已登录 WorkBuddy 桌面端 v5.3.8+）执行：python workbuddy_checkin.py --export-env --save 即可刷新
 export WB_ACCESS_TOKEN=
 export WB_USER_ID=
-# 可选：domain 一般留空
-export WB_DOMAIN=
 
 ## Trae Work 每日签到（trae_checkin.py）
-# 脚本【默认只读取以下环境变量】，不再自动解密本机登录态
+# 脚本【默认只读取以下环境变量】，不自动解密本机登录态
 # token 过期时，在本机（已登录 Trae 桌面端）执行：python trae_checkin.py --export-env --save 即可刷新
 #   - 设备 id 取 storage.json 中 iCubeAuthInfo://icube-dc:<numeric> 键的数字部分；服务端按注册指纹校验 device id，
 #     UUID 格式的 telemetry.devDeviceId 不被识别为注册设备，会触发更严格限流（sign 接口 code 9074）
 #   - 切勿把设备 id 填成 UUID；--export-env 导出的已是正确数字值
 export TRAE_TOKEN=
 export TRAE_DEVICE_ID=
-export TRAE_HOST=
 # 可选：仅用于展示
 export TRAE_USER_ID=
 
 ## MiniMax Code 每日签到（minimax_checkin.py）
-# 脚本【默认只读取以下环境变量】，不再自动读取本机登录态
+# 脚本【默认只读取以下环境变量】，不自动读取本机登录态
 # token 失效/过期时：先去 MiniMax Agent 客户端重新登录（让其写回新 token），再在本机执行：
 #   python minimax_checkin.py --export-env --save  即可把最新 token/设备参数写回 .env
 export MINIMAX_TOKEN=
