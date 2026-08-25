@@ -17,9 +17,9 @@
 * [job_spider](job_spider.py) 指定过滤条件获取远程工作信息
 * [xb](xb.py) 全网羊毛线报精选，使用 gemini-3-flash-preview 模型进行内容分析
 * [douban_spider](douban_spider.py) 豆瓣小组（上海租房版demo）
-* [workbuddy_checkin](workbuddy_checkin.py) WorkBuddy 每日积分自动签到（100积分/天，连续第7天1000积分），自动读取本机登录态，幂等可重复运行
-* [trae_checkin](trae_checkin.py) Trae Work 每日积分自动签到，自动解密本机 Trae 桌面端登录态（AES-128-CBC 信封），`--export-env` 可导出环境变量供青龙部署
-* [minimax_checkin](minimax_checkin.py) MiniMax Code 每日积分自动签到（400积分/天，第4、7天1000积分），自动读取本机 MiniMax Agent 桌面端登录态（JWT），逆向 `yy`/`x-signature` 签名，`--export-env` 可导出环境变量供青龙部署
+* [workbuddy_checkin](workbuddy_checkin.py) WorkBuddy 每日积分自动签到（100积分/天，连续第7天1000积分），**默认只读环境变量**，`--export-env`（或 `--export-env --save` 写回 .env）可读取本机登录态刷新 token，幂等可重复运行
+* [trae_checkin](trae_checkin.py) Trae Work 每日积分自动签到，**默认只读环境变量**（不再自动读本机），`--export-env` 读取本机登录态解密导出，`--export-env --save` 可写回 .env 刷新
+* [minimax_checkin](minimax_checkin.py) MiniMax Code 每日积分自动签到（400积分/天，第4、7天1000积分），**默认只读环境变量**（不再自动读本机），逆向 `yy`/`x-signature` 签名，`--export-env` 读取本机登录态导出，`--export-env --save` 可写回 .env 刷新
 * [checkin_all](checkin_all.py) 聚合签到（推荐）：**只需设一个定时**，依次跑 WorkBuddy / Trae Work / MiniMax Code 三个签到，合并结果后**只发一次推送**。各子脚本的单独定时可停用/删除
 
 ## 安装依赖库
@@ -69,33 +69,35 @@ export API_KEY=
 export API_URL=
 
 ## WorkBuddy 每日签到（workbuddy_checkin.py）
-# 留空时自动读取本机 WorkBuddy 桌面端(v5.3.8+)明文登录态；跨机/容器部署时手动填写
+# 脚本【默认只读取以下环境变量】，不再自动读取本机登录态
+# token 过期时，在本机（已登录 WorkBuddy 桌面端 v5.3.8+）执行：python workbuddy_checkin.py --export-env --save 即可刷新
 export WB_ACCESS_TOKEN=
 export WB_USER_ID=
-# 可选：domain 一般留空自动读取
+# 可选：domain 一般留空
 export WB_DOMAIN=
 
 ## Trae Work 每日签到（trae_checkin.py）
-# 留空时自动解密本机 Trae 桌面端登录态并提取数字设备 id（%APPDATA%\TRAE SOLO CN\User\globalStorage\storage.json）
+# 脚本【默认只读取以下环境变量】，不再自动解密本机登录态
+# token 过期时，在本机（已登录 Trae 桌面端）执行：python trae_checkin.py --export-env --save 即可刷新
 #   - 设备 id 取 storage.json 中 iCubeAuthInfo://icube-dc:<numeric> 键的数字部分；服务端按注册指纹校验 device id，
 #     UUID 格式的 telemetry.devDeviceId 不被识别为注册设备，会触发更严格限流（sign 接口 code 9074）
-#   - 跨机/容器部署时，在本机执行 `python trae_checkin.py --export-env` 导出后填入
-#     （token 约10天过期需重新导出；设备 id 已自动导出为正确的数字值，切勿填 UUID）
+#   - 切勿把设备 id 填成 UUID；--export-env 导出的已是正确数字值
 export TRAE_TOKEN=
 export TRAE_DEVICE_ID=
 export TRAE_HOST=
+# 可选：仅用于展示
+export TRAE_USER_ID=
 
 ## MiniMax Code 每日签到（minimax_checkin.py）
-# 留空时自动读取本机 MiniMax Agent 桌面端登录态（%APPDATA%\MiniMax Agent\minimax-agent-config.json -> tokens.accessToken）
-#   - token 由客户端运行时刷新写回，默认跟随客户端有效（实测当前 token 有效期约至 2026-10）
-#   - 跨机/容器部署时，在本机执行 `python minimax_checkin.py --export-env` 导出后填入
-#     （token 过期后在 MiniMax Agent 客户端重新登录即可）
+# 脚本【默认只读取以下环境变量】，不再自动读取本机登录态
+# token 失效/过期时：先去 MiniMax Agent 客户端重新登录（让其写回新 token），再在本机执行：
+#   python minimax_checkin.py --export-env --save  即可把最新 token/设备参数写回 .env
 export MINIMAX_TOKEN=
 export MINIMAX_USER_ID=
 # 可选：同机稳定性参数，留空时自动生成并缓存在 .minimax_device.json
 export MINIMAX_UUID=
 export MINIMAX_DEVICE_ID=
-# 可选：覆盖本机登录态配置文件路径（默认 %APPDATA%\MiniMax Agent\minimax-agent-config.json）
+# 可选：覆盖本机登录态配置文件路径（仅 --export-env 读取时使用，默认 %APPDATA%\MiniMax Agent\minimax-agent-config.json）
 export MINIMAX_CONFIG_PATH=
    ```
 

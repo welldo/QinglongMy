@@ -28,19 +28,22 @@
 鉴权头： token: <本地 JWT>（HS256，存于 minimax-agent-config.json -> tokens.accessToken）
          —— 注意 token 仅出现在 HTTP 头，绝不进入签名用的 URL/yy 计算
 
-【方式一 · 推荐，免维护，默认生效】
-不填环境变量，脚本自动读取本机已登录的 MiniMax Agent 桌面端登录态：
-    文件：%APPDATA%\\MiniMax Agent\\minimax-agent-config.json
-    键：  tokens.accessToken
-说明：该文件由 MiniMax Agent 客户端运行时刷新写回，token 跟随客户端保持有效
-      （抓包实测当前 token 有效期至约 2026-10）；token 过期时在客户端重新登录即可。
-
-【方式二 · 手动环境变量（跨机/容器部署）】
-    在本机执行 python minimax_checkin.py --export-env 可一键导出：
+【方式一 · 推荐：环境变量（脚本默认且唯一读取来源）】
+在 .env 或运行环境中设置：
     MINIMAX_TOKEN=<tokens.accessToken>
     MINIMAX_USER_ID=<realUserID>
     MINIMAX_UUID=<设备 uuid，可选>
     MINIMAX_DEVICE_ID=<数字设备 id，可选>
+脚本【默认只读取上述环境变量】，不再自动读取本机登录态，方便容器 / 跨机 / 青龙部署。
+
+【方式二 · 刷新 token：--export-env（仅本机、不进入默认运行链）】
+token 过期时，在本机（已登录 MiniMax Agent 桌面端）执行：
+    python minimax_checkin.py --export-env
+会读取本机登录态并打印最新变量；追加 --save 可直接写回 .env：
+    python minimax_checkin.py --export-env --save
+
+本机登录态文件（仅供参考，不参与默认运行）：
+    %APPDATA%\\MiniMax Agent\\minimax-agent-config.json  （键 tokens.accessToken）
 
 依赖：pip install requests
 
@@ -73,6 +76,38 @@ try:
     _HAS_NOTIFY = True
 except Exception:
     _HAS_NOTIFY = False
+
+
+def _save_env_values(values: dict):
+    """把导出的环境变量写回同目录 .env（仅更新/追加给定 key，保留其它内容）。
+    仅 --export-env --save 时调用。返回写入的变量数（0 表示失败）。"""
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    lines = []
+    if os.path.isfile(env_path):
+        try:
+            with open(env_path, "r", encoding="utf-8") as fh:
+                lines = fh.read().splitlines()
+        except Exception:
+            lines = []
+    updated = set()
+    out = []
+    for line in lines:
+        m = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*=", line)
+        if m and m.group(1) in values:
+            out.append(f"{m.group(1)}={values[m.group(1)]}")
+            updated.add(m.group(1))
+        else:
+            out.append(line)
+    for k, v in values.items():
+        if k not in updated:
+            out.append(f"{k}={v}")
+    try:
+        with open(env_path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(out) + "\n")
+        return len(values)
+    except Exception as e:
+        print(f"[warn] 写入 .env 失败: {e}")
+        return 0
 
 
 # ===== 端点常量 =====
@@ -229,23 +264,21 @@ def load_persistent_device():
 
 
 def resolve_credentials():
-    """返回凭据 dict 或 None。环境变量优先，否则读取本机登录态。"""
+    """【仅读取环境变量】返回凭据 dict（永不读本机登录态）。
+    未设置 MINIMAX_TOKEN 时返回空 token，checkin 阶段判为 NO_CREDENTIAL。
+    刷新 token 请用 `python minimax_checkin.py --export-env`。"""
     token = os.environ.get("MINIMAX_TOKEN", "").strip()
-    if token:
-        user_id = os.environ.get("MINIMAX_USER_ID", "").strip()
-        cred = {"token": token, "user_id": user_id, "user_name": "", "mail": ""}
-        local = read_local_credential()
-        if local:
-            cred["user_id"] = cred["user_id"] or local["user_id"]
-            cred["user_name"] = local["user_name"]
-            cred["mail"] = local["mail"]
-        return cred
-    cred = read_local_credential()
-    if not cred:
-        print("未发现 MiniMax 登录态：请确保本机已登录 MiniMax Agent 桌面端"
-              "（%APPDATA%\\MiniMax Agent\\minimax-agent-config.json），"
-              "或设置 MINIMAX_TOKEN / MINIMAX_USER_ID 环境变量。")
-    return cred
+    if not token:
+        # 不回退读取本机登录态：保持“只读环境变量”的纯净模型
+        return {"token": "", "user_id": os.environ.get("MINIMAX_USER_ID", "").strip(),
+                "user_name": "", "mail": "", "src": "none"}
+    return {
+        "token": token,
+        "user_id": os.environ.get("MINIMAX_USER_ID", "").strip(),
+        "user_name": "",
+        "mail": "",
+        "src": "env",
+    }
 
 
 # ===== 业务解析 =====
@@ -320,8 +353,12 @@ def api_call(host, token, params, path, method="GET", body=None, timeout=30):
 
 def checkin_once(cred: dict):
     """执行单次签到，返回 (结果标记, 通知文本)。不做重试：结果如实上报。"""
-    token = cred["token"]
-    tag = cred["user_name"] or cred["user_id"] or "未知用户"
+    cred = cred or {}
+    token = cred.get("token", "").strip()
+    if not token:
+        return "NO_CREDENTIAL", ("未获取到 MiniMax 登录态，请设置环境变量 MINIMAX_TOKEN / MINIMAX_USER_ID"
+                                 "（或运行 python minimax_checkin.py --export-env --save 刷新）")
+    tag = cred.get("user_name") or cred.get("user_id") or "未知用户"
 
     uid, did = load_persistent_device()
     base_params = build_device_params(cred.get("user_id", ""), uid, did)
@@ -365,18 +402,27 @@ def checkin_once(cred: dict):
 
 
 def export_env():
-    """--export-env：从本机登录态读取并打印环境变量（供青龙/跨机部署拷贝）。"""
+    """--export-env：从本机登录态读取并打印环境变量（token 过期时用来刷新）。
+    追加 --save 可直接写回同目录 .env。"""
     c = read_local_credential()
     if not c:
         print("未发现 MiniMax 登录态，请先在本机登录 MiniMax Agent 桌面端")
         return 1
     uid, did = load_persistent_device()
-    print(f"MINIMAX_TOKEN={c['token']}")
-    print(f"MINIMAX_USER_ID={c['user_id']}")
-    print(f"MINIMAX_UUID={uid}")
-    print(f"MINIMAX_DEVICE_ID={did}")
+    values = {
+        "MINIMAX_TOKEN": c["token"],
+        "MINIMAX_USER_ID": c["user_id"],
+        "MINIMAX_UUID": uid,
+        "MINIMAX_DEVICE_ID": did,
+    }
+    for k, v in values.items():
+        print(f"{k}={v}")
     if c.get("user_name") or c.get("mail"):
         print(f"# 用户: {c.get('user_name')} <{c.get('mail')}>")
+    if "--save" in sys.argv:
+        n = _save_env_values(values)
+        if n:
+            print(f"# 已将上述 {n} 个变量写回 .env")
     return 0
 
 

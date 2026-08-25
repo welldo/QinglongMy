@@ -9,46 +9,45 @@
 脚本签到点 = POST https://copilot.tencent.com/v2/billing/meter/daily-checkin
 鉴权需要两个值：accessToken（Bearer） + uid（X-User-Id）。
 
-【方式一 · 推荐，免维护，默认生效】
-不填写任何环境变量，脚本自动读取本机已登录的 WorkBuddy 桌面端明文登录态：
-
-    文件： %LOCALAPPDATA%\\CodeBuddyExtension\\Data\\Public\\auth\\workbuddy-desktop.info
-    （v5.3.8+ 桌面端写入，纯文本 JSON，无需解密）
-
-    字段提取：
-        WB_ACCESS_TOKEN = JSON 中的  auth.accessToken
-        WB_USER_ID      = JSON 中的  account.uid
-        WB_DOMAIN       = JSON 中的  auth.domain  （一般无需填写，留空自动读取）
-
-    说明：desktop.info 由桌面端定期刷新，脚本每次运行都重新读取，token 永不过期。
-    macOS： ~/Library/Application Support/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info
-    Linux： ~/.config/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info
-
-【方式二 · 手动填入环境变量（适合跨机 / 容器部署）】
-从本机登录态文件里取出上面两个字段，写入 .env：
-
+【方式一 · 推荐：环境变量（脚本默认且唯一读取来源）】
+在 .env 或运行环境中设置：
         WB_ACCESS_TOKEN=<auth.accessToken 的值>
         WB_USER_ID=<account.uid 的值>
+        WB_DOMAIN=<auth.domain，可选>
 
-    注意：这是静态快照，桌面端刷新后旧 token 会失效（401），需重新拷贝或改回方式一。
+    脚本【默认只读取上述环境变量】，不再自动读取本机登录态，
+    方便容器 / 跨机 / 青龙部署：凭据完全由环境变量决定，行为可预期。
 
-【env 提取小技巧（本机一行命令）】
-    python - <<'PY'
-    import json,os
-    p=os.path.join(os.environ['LOCALAPPDATA'],'CodeBuddyExtension','Data','Public','auth','workbuddy-desktop.info')
-    j=json.load(open(p,encoding='utf-8'))
-    print('WB_ACCESS_TOKEN='+j['auth']['accessToken'])
-    print('WB_USER_ID='+str(j['account']['uid']))
-    PY
+【方式二 · 刷新 token：--export-env（仅本机、不进入默认运行链）】
+token 过期时，在本机（已登录 WorkBuddy 桌面端 v5.3.8+）执行：
+        python workbuddy_checkin.py --export-env
+    会读取本机明文登录态并打印最新变量；追加 --save 可直接写回 .env：
+        python workbuddy_checkin.py --export-env --save
 
-优先级：环境变量 WB_ACCESS_TOKEN+WB_USER_ID > 本机明文登录态文件。
+本机登录态文件（仅供参考，不参与默认运行）：
+    %LOCALAPPDATA%\\CodeBuddyExtension\\Data\\Public\\auth\\workbuddy-desktop.info
+    （v5.3.8+ 桌面端写入，纯文本 JSON，无需解密）
+    macOS：~/Library/Application Support/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info
+    Linux：~/.config/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info
+    字段： WB_ACCESS_TOKEN = auth.accessToken ， WB_USER_ID = account.uid
+
+优先级（仅 --export-env 路径）：本机明文登录态 > 其它。
 ==============================================================================
 """
 
 import os
+import re
+import sys
 import json
 import platform
 import requests
+
+# 本地开发时自动加载同目录 .env；已设置的真实环境变量优先，不受影响
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+except ImportError:
+    pass
 
 # 通知模块（同目录 sendNotify.py）；若缺失则降级为仅打印，不影响领取。
 try:
@@ -56,6 +55,38 @@ try:
     _HAS_NOTIFY = True
 except Exception:
     _HAS_NOTIFY = False
+
+
+def _save_env_values(values: dict):
+    """把导出的环境变量写回同目录 .env（仅更新/追加给定 key，保留其它内容）。
+    仅 --export-env --save 时调用。返回写入的变量数（0 表示失败）。"""
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    lines = []
+    if os.path.isfile(env_path):
+        try:
+            with open(env_path, "r", encoding="utf-8") as fh:
+                lines = fh.read().splitlines()
+        except Exception:
+            lines = []
+    updated = set()
+    out = []
+    for line in lines:
+        m = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*=", line)
+        if m and m.group(1) in values:
+            out.append(f"{m.group(1)}={values[m.group(1)]}")
+            updated.add(m.group(1))
+        else:
+            out.append(line)
+    for k, v in values.items():
+        if k not in updated:
+            out.append(f"{k}={v}")
+    try:
+        with open(env_path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(out) + "\n")
+        return len(values)
+    except Exception as e:
+        print(f"[warn] 写入 .env 失败: {e}")
+        return 0
 
 API_BASE = "https://copilot.tencent.com"
 CHECKIN_PATH = "/v2/billing/meter/daily-checkin"
@@ -83,14 +114,20 @@ def _local_info_candidates():
 
 
 def resolve_credentials():
-    """优先用环境变量，缺失时回退读取本机明文登录态。"""
+    """【仅读取环境变量】返回凭据 dict。
+    未设置 WB_ACCESS_TOKEN / WB_USER_ID 时返回空 token，checkin 阶段判为 NO_CREDENTIAL。
+    本机登录态不再自动读取；刷新 token 请用 `python workbuddy_checkin.py --export-env`。"""
     token = os.environ.get("WB_ACCESS_TOKEN", "").strip()
     uid = os.environ.get("WB_USER_ID", "").strip()
     domain = os.environ.get("WB_DOMAIN", "").strip()
-
     if token and uid:
         return {"token": token, "uid": uid, "domain": domain, "src": "env"}
+    # 不回退读取本机登录态：保持“只读环境变量”的纯净模型
+    return {"token": "", "uid": "", "domain": "", "src": "none"}
 
+
+def read_local_credential():
+    """读取本机已登录的 WorkBuddy 桌面端明文登录态（仅 --export-env 使用）。"""
     for f in _local_info_candidates():
         if not os.path.isfile(f):
             continue
@@ -103,10 +140,32 @@ def resolve_credentials():
             uid = str(acct.get("uid", "") or "")
             domain = str(auth.get("domain", "") or "")
             if token and uid:
-                return {"token": token, "uid": uid, "domain": domain, "src": "local"}
+                return {"token": token, "uid": uid, "domain": domain}
         except Exception as e:
             print(f"[warn] 读取本地登录态失败 {f}: {e}")
-    return {"token": "", "uid": "", "domain": "", "src": "none"}
+    return None
+
+
+def export_env():
+    """--export-env：读取本机登录态并打印/保存环境变量（token 过期时用来刷新）。"""
+    c = read_local_credential()
+    if not c:
+        print("未发现 WorkBuddy 登录态，请先在本机登录 WorkBuddy 桌面端（v5.3.8+）")
+        return 1
+    values = {
+        "WB_ACCESS_TOKEN": c["token"],
+        "WB_USER_ID": c["uid"],
+        "WB_DOMAIN": c["domain"],
+    }
+    print(f"WB_ACCESS_TOKEN={c['token']}")
+    print(f"WB_USER_ID={c['uid']}")
+    if c["domain"]:
+        print(f"WB_DOMAIN={c['domain']}")
+    if "--save" in sys.argv:
+        n = _save_env_values(values)
+        if n:
+            print(f"# 已将上述 {n} 个变量写回 .env")
+    return 0
 
 
 def _call(token, uid, domain, path):
@@ -169,6 +228,9 @@ def checkin_once(cred):
 
 
 def main():
+    if "--export-env" in sys.argv:
+        sys.exit(export_env())
+
     cred = resolve_credentials()
     flag, content = checkin_once(cred)
     print(f"RESULT={flag} | {content}")

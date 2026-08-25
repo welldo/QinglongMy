@@ -15,27 +15,23 @@
     Authorization:  Cloud-IDE-JWT {token}
     x-device-id:    {数字格式设备id}   # 取自 storage.json 的 iCubeAuthInfo://icube-dc:<numeric> 键
 
-【方式一 · 推荐，免维护，默认生效】
-不填环境变量，脚本自动读取本机已登录的 Trae 桌面端登录态并解密：
-
-    文件：%APPDATA%\\TRAE SOLO CN\\User\\globalStorage\\storage.json
-    键：  iCubeAuthInfo://icube.cloudide  （base64 加密信封）
-
-    信封解密算法（AES-128-CBC / SHA512 完整性校验）：
-        HEADER(6) + randomKey(32) + ciphertext
-        secret  = LEFT_SECRET ⊕ RIGHT_SECRET
-        derived = SHA512( SHA512(randomKey) ++ secret )
-        key = derived[0..16], iv = derived[16..32]
-        明文 = digest(64) + payload(JSON)，校验 digest == SHA512(payload)
-
-    说明：storage.json 由 Trae 客户端运行时自行刷新写回，脚本每次运行重新读取，
-    token 跟随客户端保持有效；token 过期时打开一次 Trae 客户端即可。
-
-【方式二 · 手动环境变量（跨机/容器部署）】
-    在本机执行 python trae_checkin.py --export-env 可一键导出以下变量：
+【方式一 · 推荐：环境变量（脚本默认且唯一读取来源）】
+在 .env 或运行环境中设置：
     TRAE_TOKEN=<auth_info.token>
     TRAE_DEVICE_ID=<iCubeAuthInfo://icube-dc:<numeric> 键中的数字设备id>
-    TRAE_HOST=<auth_info.host>        # 如 https://api.trae.cn，可选
+    TRAE_HOST=<auth_info.host>               # 如 https://api.trae.cn，可选
+    TRAE_USER_ID=<auth_info.userId>           # 可选，仅用于展示
+脚本【默认只读取上述环境变量】，不再自动读取本机登录态，方便容器 / 跨机 / 青龙部署。
+
+【方式二 · 刷新 token：--export-env（仅本机、不进入默认运行链）】
+token 过期时，在本机（已登录 Trae 桌面端）执行：
+    python trae_checkin.py --export-env
+会解密本机 storage.json 并打印最新变量；追加 --save 可直接写回 .env：
+    python trae_checkin.py --export-env --save
+
+本机登录态文件（仅供参考，不参与默认运行）：
+    %APPDATA%\\TRAE SOLO CN\\User\\globalStorage\\storage.json
+    键： iCubeAuthInfo://icube.cloudide  （base64 加密信封，AES-128-CBC / SHA512 完整性校验）
 
 依赖：pip install requests pycryptodome
 
@@ -46,6 +42,7 @@
 
 import os
 import sys
+import re
 import json
 import base64
 import hashlib
@@ -72,6 +69,38 @@ try:
     _HAS_NOTIFY = True
 except Exception:
     _HAS_NOTIFY = False
+
+
+def _save_env_values(values: dict):
+    """把导出的环境变量写回同目录 .env（仅更新/追加给定 key，保留其它内容）。
+    仅 --export-env --save 时调用。返回写入的变量数（0 表示失败）。"""
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    lines = []
+    if os.path.isfile(env_path):
+        try:
+            with open(env_path, "r", encoding="utf-8") as fh:
+                lines = fh.read().splitlines()
+        except Exception:
+            lines = []
+    updated = set()
+    out = []
+    for line in lines:
+        m = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*=", line)
+        if m and m.group(1) in values:
+            out.append(f"{m.group(1)}={values[m.group(1)]}")
+            updated.add(m.group(1))
+        else:
+            out.append(line)
+    for k, v in values.items():
+        if k not in updated:
+            out.append(f"{k}={v}")
+    try:
+        with open(env_path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(out) + "\n")
+        return len(values)
+    except Exception as e:
+        print(f"[warn] 写入 .env 失败: {e}")
+        return 0
 
 # ===== 加密信封常量（源自 TRAE 客户端 ）=====
 HEADER = bytes([116, 99, 5, 16, 0, 0])
@@ -202,29 +231,28 @@ def read_local_credential():
 
 
 def resolve_credentials():
-    """返回凭据 dict 或 None。环境变量优先，否则读取本机 Trae 主实例登录态。"""
+    """【仅读取环境变量】返回凭据 dict（永不读本机登录态）。
+    未设置 TRAE_TOKEN 时返回空 token，checkin 阶段判为 NO_CREDENTIAL。
+    刷新 token 请用 `python trae_checkin.py --export-env`。"""
     token = os.environ.get("TRAE_TOKEN", "").strip()
-    if token:
-        cred = {
-            "token": token,
+    if not token:
+        # 不回退读取本机登录态：保持“只读环境变量”的纯净模型
+        return {
+            "token": "",
             "device_id": os.environ.get("TRAE_DEVICE_ID", "").strip(),
             "host": os.environ.get("TRAE_HOST", "").strip().rstrip("/"),
             "user_id": os.environ.get("TRAE_USER_ID", "").strip(),
             "expires_ms": 0,
+            "src": "none",
         }
-        # 从本机登录态回填 userId/过期时间（仅展示与提示用，不影响鉴权）
-        local = read_local_credential()
-        if local:
-            cred["user_id"] = cred["user_id"] or local["user_id"]
-            cred["expires_ms"] = local["expires_ms"]
-        return cred
-
-    cred = read_local_credential()
-    if not cred:
-        print("未发现 Trae 登录态：请确保本机已登录 Trae 桌面端"
-              "（%APPDATA%\\TRAE SOLO CN\\User\\globalStorage\\storage.json），"
-              "或设置 TRAE_TOKEN / TRAE_DEVICE_ID 环境变量。")
-    return cred
+    return {
+        "token": token,
+        "device_id": os.environ.get("TRAE_DEVICE_ID", "").strip(),
+        "host": os.environ.get("TRAE_HOST", "").strip().rstrip("/"),
+        "user_id": os.environ.get("TRAE_USER_ID", "").strip(),
+        "expires_ms": 0,
+        "src": "env",
+    }
 
 
 AUTH_FAIL_KEYWORDS = ("unauthorized", "token", "expired", "not login",
@@ -363,18 +391,25 @@ def query_points(host, token, device_id, user_id=""):
 
 def checkin_once(cred: dict):
     """执行单次签到，返回 (结果标记, 通知文本)。不做重试：结果如实上报。"""
-    host = cred["host"] or "https://api.trae.cn"
-    tag = cred["user_id"] or "未知用户"
+    cred = cred or {}
+    token = cred.get("token", "").strip()
+    if not token:
+        return "NO_CREDENTIAL", "未获取到 Trae 登录态，请设置环境变量 TRAE_TOKEN / TRAE_DEVICE_ID（或运行 python trae_checkin.py --export-env --save 刷新）"
 
-    if cred["expires_ms"]:
+    host = cred.get("host") or "https://api.trae.cn"
+    tag = cred.get("user_id") or "未知用户"
+    device_id = cred.get("device_id", "")
+    user_id = cred.get("user_id", "")
+
+    if cred.get("expires_ms"):
         remain_h = (cred["expires_ms"] - datetime.now(timezone.utc).timestamp() * 1000) / 3600000
         if remain_h <= 0:
             return "AUTH_EXPIRED", f"⚠️ {tag} token 已过期，请打开 Trae 桌面端刷新登录态后重试"
 
     # 1) 状态查询
-    sc, sb = api_call(host, cred["token"], cred["device_id"], STATUS_PATH, user_id=cred["user_id"])
+    sc, sb = api_call(host, token, device_id, STATUS_PATH, user_id=user_id)
     if isinstance(sb, dict) and sb.get("checked_in"):
-        pts = query_points(host, cred["token"], cred["device_id"], cred["user_id"])
+        pts = query_points(host, token, device_id, user_id)
         extra = f"，剩余积分 {pts}" if pts is not None else ""
         return "ALREADY_TODAY", f"ℹ️ {tag} 今日已签到{extra}"
     if is_auth_failure(sc, sb):
@@ -386,13 +421,13 @@ def checkin_once(cred: dict):
         return "STATUS_ERR", f"⚠️ {tag} 状态查询异常：HTTP {sc} {msg}"
 
     # 2) 领取
-    cc, cb = api_call(host, cred["token"], cred["device_id"], CLAIM_PATH, user_id=cred["user_id"])
+    cc, cb = api_call(host, token, device_id, CLAIM_PATH, user_id=user_id)
     if is_auth_failure(cc, cb):
         return "AUTH_EXPIRED", f"⚠️ {tag} 鉴权失败（HTTP {cc}），请打开 Trae 桌面端刷新登录态后重试"
     if api_succeeded(cb):
         points = ((cb.get("data") or {}).get("points")) or cb.get("points")
         message = cb.get("message") or cb.get("msg") or ""
-        pts = query_points(host, cred["token"], cred["device_id"], cred["user_id"])
+        pts = query_points(host, token, device_id, user_id)
         extra = f"，剩余积分 {pts}" if pts is not None else ""
         text = "签到成功" if message == "success" else message
         gain = f"本次 +{points} 积分" if points else text
@@ -405,18 +440,27 @@ def checkin_once(cred: dict):
 
 
 def export_env():
-    """--export-env：从本机登录态解密并打印环境变量（供青龙/跨机部署拷贝）。"""
+    """--export-env：从本机登录态解密并打印环境变量（token 过期时用来刷新）。
+    追加 --save 可直接写回同目录 .env。"""
     c = read_local_credential()
     if not c:
         print("未发现 Trae 登录态，请先在本机登录 Trae 桌面端")
         return 1
-    print(f"TRAE_TOKEN={c['token']}")
-    print(f"TRAE_DEVICE_ID={c['device_id']}")
-    print(f"TRAE_HOST={c['host'] or 'https://api.trae.cn'}")
-    print(f"TRAE_USER_ID={c['user_id']}")
+    values = {
+        "TRAE_TOKEN": c["token"],
+        "TRAE_DEVICE_ID": c["device_id"],
+        "TRAE_HOST": c["host"] or "https://api.trae.cn",
+        "TRAE_USER_ID": c["user_id"],
+    }
+    for k, v in values.items():
+        print(f"{k}={v}")
     if c["expires_ms"]:
         exp = datetime.fromtimestamp(c["expires_ms"] / 1000, tz=timezone.utc)
         print(f"# token 过期时间(UTC): {exp:%Y-%m-%d %H:%M}")
+    if "--save" in sys.argv:
+        n = _save_env_values(values)
+        if n:
+            print(f"# 已将上述 {n} 个变量写回 .env")
     return 0
 
 
