@@ -317,53 +317,35 @@ def build_checkin_headers(token: str, device_id: str, user_id: str = "") -> dict
 
 
 def api_call(host, token, device_id, path, body=None, timeout=30, user_id=""):
-    # 对齐真实 Trae 桌面端完整请求头（含 VSCode UA + x-market-user-id + vscode-sessionid 等）
+    """发起签到接口请求。
+
+    静默运行：成功不输出；仅当 HTTP 非 200（传输层失败）或请求异常时，打印一行
+    简短日志（路径 + HTTP 状态 + 截断响应体），且绝不打印任何鉴权头与 token。
+    """
     headers = build_checkin_headers(token, device_id, user_id)
     url = f"{host}{path}"
     req_body = json.dumps(body or {})
-
-    # 打印完整请求信息
-    print(f"\n{'='*60}")
-    print(f"[REQUEST] POST {url}")
-    print(f"[REQUEST] Headers:")
-    for k, v in headers.items():
-        if k == "Authorization":
-            print(f"  {k}: Cloud-IDE-JWT {v[len('Cloud-IDE-JWT '):len('Cloud-IDE-JWT ')+20]}...")
-        else:
-            print(f"  {k}: {v}")
-    print(f"[REQUEST] Body: {req_body}")
 
     try:
         # 用 PreparedRequest 精确控制最终发出的 header，避免 requests 自动注入多余默认值
         req = requests.Request("POST", url, headers=headers, data=req_body)
         prepared = req.prepare()
 
-        print(f"[REQUEST] 最终发出 Headers (含库自动添加):")
-        for k, v in prepared.headers.items():
-            if k == "Authorization":
-                print(f"  {k}: Cloud-IDE-JWT {v[len('Cloud-IDE-JWT '):len('Cloud-IDE-JWT ')+20]}...")
-            else:
-                print(f"  {k}: {v}")
-
         session = requests.Session()
         # proxies=None 强制直连 api.trae.cn，避免走系统/本地代理导致被限频或连不上
         r = session.send(prepared, timeout=timeout, proxies={"http": None, "https": None})
 
-        # 打印完整响应信息
-        print(f"\n[RESPONSE] Status: {r.status_code}")
-        print(f"[RESPONSE] Headers:")
-        for k, v in r.headers.items():
-            print(f"  {k}: {v}")
-        print(f"[RESPONSE] Body: {r.text[:1000]}")
-        print(f"{'='*60}\n")
-
         try:
-            return r.status_code, r.json()
+            data = r.json()
         except Exception:
-            return r.status_code, {"raw": r.text[:300]}
+            data = {"raw": r.text[:300]}
+
+        # 成功静默；仅传输层失败时打印一行简短日志（不含 token）
+        if r.status_code != 200:
+            print(f"[trae] {path} -> HTTP {r.status_code} {r.text[:200]}")
+        return r.status_code, data
     except Exception as e:
-        print(f"[RESPONSE] Error: {e}")
-        print(f"{'='*60}\n")
+        print(f"[trae] {path} 请求异常: {e}")
         return 0, {"error": str(e)}
 
 
