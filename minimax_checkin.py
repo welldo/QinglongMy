@@ -264,20 +264,14 @@ def load_persistent_device():
 
 
 def resolve_credentials():
-    """【仅读取环境变量】返回凭据 dict（永不读本机登录态）。
+    """仅读取环境变量，返回凭据 dict（永不读本机登录态）。
     未设置 MINIMAX_TOKEN 时返回空 token，checkin 阶段判为 NO_CREDENTIAL。
     刷新 token 请用 `python minimax_checkin.py --export-env`。"""
-    token = os.environ.get("MINIMAX_TOKEN", "").strip()
-    if not token:
-        # 不回退读取本机登录态：保持“只读环境变量”的纯净模型
-        return {"token": "", "user_id": os.environ.get("MINIMAX_USER_ID", "").strip(),
-                "user_name": "", "mail": "", "src": "none"}
     return {
-        "token": token,
+        "token": os.environ.get("MINIMAX_TOKEN", "").strip(),
         "user_id": os.environ.get("MINIMAX_USER_ID", "").strip(),
         "user_name": "",
         "mail": "",
-        "src": "env",
     }
 
 

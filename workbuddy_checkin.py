@@ -114,16 +114,14 @@ def _local_info_candidates():
 
 
 def resolve_credentials():
-    """【仅读取环境变量】返回凭据 dict。
-    未设置 WB_ACCESS_TOKEN / WB_USER_ID 时返回空 token，checkin 阶段判为 NO_CREDENTIAL。
-    本机登录态不再自动读取；刷新 token 请用 `python workbuddy_checkin.py --export-env`。"""
-    token = os.environ.get("WB_ACCESS_TOKEN", "").strip()
-    uid = os.environ.get("WB_USER_ID", "").strip()
-    domain = os.environ.get("WB_DOMAIN", "").strip()
-    if token and uid:
-        return {"token": token, "uid": uid, "domain": domain, "src": "env"}
-    # 不回退读取本机登录态：保持“只读环境变量”的纯净模型
-    return {"token": "", "uid": "", "domain": "", "src": "none"}
+    """仅读取环境变量，返回凭据 dict。
+    缺少 WB_ACCESS_TOKEN / WB_USER_ID 时返回空 token，checkin 阶段判为 NO_CREDENTIAL。
+    刷新 token 请用 `python workbuddy_checkin.py --export-env`。"""
+    return {
+        "token": os.environ.get("WB_ACCESS_TOKEN", "").strip(),
+        "uid": os.environ.get("WB_USER_ID", "").strip(),
+        "domain": os.environ.get("WB_DOMAIN", "").strip(),
+    }
 
 
 def read_local_credential():
@@ -193,21 +191,16 @@ def checkin_once(cred):
     token = cred.get("token", "")
     uid = cred.get("uid", "")
     domain = cred.get("domain", "")
-    src = cred.get("src", "")
 
     if not token or not uid:
-        return "NO_CREDENTIAL", ("未获取到 WorkBuddy 登录态：请设置环境变量 WB_ACCESS_TOKEN / WB_USER_ID，"
-                                 "或确保本机已登录 WorkBuddy 桌面端（v5.3.8+）。")
-
-    print(f"[info] 凭据来源={src} uid={uid} domain={domain or '-'}")
+        return "NO_CREDENTIAL", ("未获取到 WorkBuddy 登录态，请设置环境变量 WB_ACCESS_TOKEN / WB_USER_ID"
+                                 "（或运行 python workbuddy_checkin.py --export-env --save 刷新）")
 
     # 查询状态（仅参考，today_checked_in 不可靠）
     sc, sb = _call(token, uid, domain, STATUS_PATH)
-    print(f"[status] HTTP {sc} -> {json.dumps(sb, ensure_ascii=False)[:200]}")
 
     # 执行领取（幂等：code=10001 表示今日已签）
     cc, cb = _call(token, uid, domain, CHECKIN_PATH)
-    print(f"[checkin] HTTP {cc} -> {json.dumps(cb, ensure_ascii=False)[:300]}")
 
     if cc == 0:
         content = f"⚠️ 网络异常，签到请求未发出：{json.dumps(cb, ensure_ascii=False)[:200]}"

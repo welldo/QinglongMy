@@ -231,27 +231,15 @@ def read_local_credential():
 
 
 def resolve_credentials():
-    """【仅读取环境变量】返回凭据 dict（永不读本机登录态）。
+    """仅读取环境变量，返回凭据 dict（永不读本机登录态）。
     未设置 TRAE_TOKEN 时返回空 token，checkin 阶段判为 NO_CREDENTIAL。
     刷新 token 请用 `python trae_checkin.py --export-env`。"""
-    token = os.environ.get("TRAE_TOKEN", "").strip()
-    if not token:
-        # 不回退读取本机登录态：保持“只读环境变量”的纯净模型
-        return {
-            "token": "",
-            "device_id": os.environ.get("TRAE_DEVICE_ID", "").strip(),
-            "host": os.environ.get("TRAE_HOST", "").strip().rstrip("/"),
-            "user_id": os.environ.get("TRAE_USER_ID", "").strip(),
-            "expires_ms": 0,
-            "src": "none",
-        }
     return {
-        "token": token,
+        "token": os.environ.get("TRAE_TOKEN", "").strip(),
         "device_id": os.environ.get("TRAE_DEVICE_ID", "").strip(),
         "host": os.environ.get("TRAE_HOST", "").strip().rstrip("/"),
         "user_id": os.environ.get("TRAE_USER_ID", "").strip(),
         "expires_ms": 0,
-        "src": "env",
     }
 
 
@@ -306,7 +294,7 @@ def is_rate_limited(http_status: int, data) -> bool:
 #   - Authorization:   Cloud-IDE-JWT <token>
 #   - x-device-id:     <数字格式设备 id，取自 iCubeAuthInfo://icube-dc:<numeric> 键>
 # 逆向证明该端点的服务端校验只认这 3 个头；附加 UA / 多余 x-* 头反而偏离真机。
-def build_checkin_headers(token: str, device_id: str, user_id: str = "") -> dict:
+def build_checkin_headers(token: str, device_id: str) -> dict:
     """签到/状态/积分接口共用的请求头，对齐逆向仓库 postUg 的最小集。"""
     return {
         "content-type": "application/json",
@@ -316,13 +304,13 @@ def build_checkin_headers(token: str, device_id: str, user_id: str = "") -> dict
     }
 
 
-def api_call(host, token, device_id, path, body=None, timeout=30, user_id=""):
+def api_call(host, token, device_id, path, body=None, timeout=30):
     """发起签到接口请求。
 
     静默运行：成功不输出；仅当 HTTP 非 200（传输层失败）或请求异常时，打印一行
     简短日志（路径 + HTTP 状态 + 截断响应体），且绝不打印任何鉴权头与 token。
     """
-    headers = build_checkin_headers(token, device_id, user_id)
+    headers = build_checkin_headers(token, device_id)
     url = f"{host}{path}"
     req_body = json.dumps(body or {})
 
@@ -349,10 +337,10 @@ def api_call(host, token, device_id, path, body=None, timeout=30, user_id=""):
         return 0, {"error": str(e)}
 
 
-def query_points(host, token, device_id, user_id=""):
+def query_points(host, token, device_id):
     """查询剩余积分（entitlement_list 结构化解析，失败则忽略）。"""
     sc, sb = api_call(host, token, device_id, ENTITLEMENT_PATH,
-                      body={"require_usage": True}, timeout=15, user_id=user_id)
+                      body={"require_usage": True}, timeout=15)
     try:
         packs = (((sb or {}).get("data") or {}).get("user_entitlement_pack_list")) or []
         total = 0
@@ -381,7 +369,6 @@ def checkin_once(cred: dict):
     host = cred.get("host") or "https://api.trae.cn"
     tag = cred.get("user_id") or "未知用户"
     device_id = cred.get("device_id", "")
-    user_id = cred.get("user_id", "")
 
     if cred.get("expires_ms"):
         remain_h = (cred["expires_ms"] - datetime.now(timezone.utc).timestamp() * 1000) / 3600000
@@ -389,9 +376,9 @@ def checkin_once(cred: dict):
             return "AUTH_EXPIRED", f"⚠️ {tag} token 已过期，请打开 Trae 桌面端刷新登录态后重试"
 
     # 1) 状态查询
-    sc, sb = api_call(host, token, device_id, STATUS_PATH, user_id=user_id)
+    sc, sb = api_call(host, token, device_id, STATUS_PATH)
     if isinstance(sb, dict) and sb.get("checked_in"):
-        pts = query_points(host, token, device_id, user_id)
+        pts = query_points(host, token, device_id)
         extra = f"，剩余积分 {pts}" if pts is not None else ""
         return "ALREADY_TODAY", f"ℹ️ {tag} 今日已签到{extra}"
     if is_auth_failure(sc, sb):
@@ -403,13 +390,13 @@ def checkin_once(cred: dict):
         return "STATUS_ERR", f"⚠️ {tag} 状态查询异常：HTTP {sc} {msg}"
 
     # 2) 领取
-    cc, cb = api_call(host, token, device_id, CLAIM_PATH, user_id=user_id)
+    cc, cb = api_call(host, token, device_id, CLAIM_PATH)
     if is_auth_failure(cc, cb):
         return "AUTH_EXPIRED", f"⚠️ {tag} 鉴权失败（HTTP {cc}），请打开 Trae 桌面端刷新登录态后重试"
     if api_succeeded(cb):
         points = ((cb.get("data") or {}).get("points")) or cb.get("points")
         message = cb.get("message") or cb.get("msg") or ""
-        pts = query_points(host, token, device_id, user_id)
+        pts = query_points(host, token, device_id)
         extra = f"，剩余积分 {pts}" if pts is not None else ""
         text = "签到成功" if message == "success" else message
         gain = f"本次 +{points} 积分" if points else text
