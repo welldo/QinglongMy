@@ -20,7 +20,7 @@
 * [workbuddy_checkin](workbuddy_checkin.py) WorkBuddy 每日积分自动签到（100积分/天，连续第7天1000积分），**默认只读环境变量**，`--export-env`（或 `--export-env --save` 写回 .env）可读取本机登录态刷新 token，幂等可重复运行
 * [trae_checkin](trae_checkin.py) Trae Work 每日积分自动签到，**默认只读环境变量**（不再自动读本机），`--export-env` 读取本机登录态解密导出，`--export-env --save` 可写回 .env 刷新
 * [minimax_checkin](minimax_checkin.py) MiniMax Code 每日积分自动签到（400积分/天，第4、7天1000积分），**默认只读环境变量**（不再自动读本机），逆向 `yy`/`x-signature` 签名，`--export-env` 读取本机登录态导出，`--export-env --save` 可写回 .env 刷新
-* [checkin_all](checkin_all.py) 聚合签到（推荐）：**只需设一个定时**，依次跑 WorkBuddy / Trae Work / MiniMax Code 三个签到，合并结果后**只发一次推送**。各子脚本的单独定时可停用/删除
+* [checkin_all](checkin_all.py) 聚合签到（推荐）：**只需设一个定时**，依次跑 WorkBuddy / Trae Work / MiniMax Code 三个签到，合并结果后**只发一次推送**。各子脚本的单独定时可停用/删除。另支持 `python checkin_all.py --export-env --save` **一条命令批量刷新三个 token**（等价逐个执行各子脚本的 `--export-env --save`），要求本机三个桌面端均已登录
 
 ## 安装依赖库
 
