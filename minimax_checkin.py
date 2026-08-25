@@ -32,8 +32,8 @@
 在 .env 或运行环境中设置：
     MINIMAX_TOKEN=<tokens.accessToken>
     MINIMAX_USER_ID=<realUserID>
-    MINIMAX_UUID=<设备 uuid，可选>
-    MINIMAX_DEVICE_ID=<数字设备 id，可选>
+    MINIMAX_UUID=<设备 uuid，可选，留空则回落脚本内置稳定默认值>
+    MINIMAX_DEVICE_ID=<数字设备 id，可选，留空则回落脚本内置稳定默认值>
 脚本【默认只读取上述环境变量】，不再自动读取本机登录态，方便容器 / 跨机 / 青龙部署。
 
 【方式二 · 刷新 token：--export-env（仅本机、不进入默认运行链）】
@@ -55,7 +55,6 @@ token 过期时，在本机（已登录 MiniMax Agent 桌面端）执行：
 import os
 import sys
 import json
-import uuid
 import hashlib
 import re
 import urllib.parse
@@ -238,29 +237,21 @@ def read_local_credential():
         return None
 
 
+# 稳定的默认设备身份：仅在未设置对应环境变量时回落使用，避免每次随机导致设备指纹漂移。
+# 如需更换，可在 .env / 运行环境中设置 MINIMAX_UUID 与 MINIMAX_DEVICE_ID 覆盖。
+_DEFAULT_UUID = "3548c8fa-9ac2-4a28-8f6b-71ecd88bc048"
+_DEFAULT_DEVICE_ID = "1790426211"
+
+
 def load_persistent_device():
-    """读取/生成并持久化稳定的 uuid 与数字 device_id（同机多次运行保持一致）。"""
-    cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".minimax_device.json")
+    """返回稳定的 uuid 与数字 device_id。
+    优先取环境变量 MINIMAX_UUID / MINIMAX_DEVICE_ID（便于跨机/容器部署）；
+    未设置时回落到脚本内写死的稳定常量。不再读写任何缓存文件。"""
     uid = os.environ.get("MINIMAX_UUID", "").strip()
     did = os.environ.get("MINIMAX_DEVICE_ID", "").strip()
     if uid and did:
         return uid, did
-    data = {}
-    if os.path.isfile(cache_path):
-        try:
-            with open(cache_path, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
-        except Exception:
-            data = {}
-    uid = uid or data.get("uuid") or str(uuid.uuid4())
-    did = did or data.get("device_id") or str(__import__("random").randint(10**9, 10**10 - 1))
-    if not os.environ.get("MINIMAX_UUID") or not os.environ.get("MINIMAX_DEVICE_ID"):
-        try:
-            with open(cache_path, "w", encoding="utf-8") as fh:
-                json.dump({"uuid": uid, "device_id": did}, fh)
-        except Exception:
-            pass
-    return uid, did
+    return (uid or _DEFAULT_UUID), (did or _DEFAULT_DEVICE_ID)
 
 
 def resolve_credentials():

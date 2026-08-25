@@ -22,6 +22,12 @@ new Env('每日Token签到汇总');
     - 任一脚本运行异常均被捕获，结果如实汇总。
     - 设置环境变量 CHECKIN_NO_NOTIFY=1 可关闭【最终合并推送】，便于本地调试。
 
+批量刷新（写回）token：在本机已登录三个桌面端的前提下，用一条命令即可把
+    本机最新登录态写回 .env（等价逐个执行各脚本的 --export-env --save）：
+        python checkin_all.py --export-env          # 仅打印各脚本从本机读出的变量
+        python checkin_all.py --export-env --save   # 一次性写回 .env（推荐刷新时加 --save）
+    任一脚本在本机未登录 / 依赖缺失 / 无 export_env 时会跳过并提示，不中断其余脚本。
+
 在青龙/定时平台只需建【一个】任务指向本脚本即可，原 3 个独立签到任务的
 定时可停用或删除。
 
@@ -112,9 +118,39 @@ def build_summary(results):
     return "\n".join(lines)
 
 
+def export_all():
+    """批量刷新（写回）token：依次调用各子脚本的 export_env()，从本机登录态读取
+    最新凭据；若带 --save 则一次性写回 .env。任一脚本失败仅跳过并提示。"""
+    saving = "--save" in sys.argv
+    print("== 批量刷新 token ==（从本机登录态读取最新凭据）")
+    if not saving:
+        print("提示：未带 --save，仅打印变量；加 --save 才会写回 .env")
+    print("要求本机已登录：WorkBuddy 桌面端 / Trae 桌面端 / MiniMax Agent 桌面端\n")
+    ok = 0
+    for display_name, mod_name, _title in TASKS:
+        mod, err = _import_module(mod_name)
+        if mod is None:
+            print(f"[跳过] {display_name}：模块导入失败（{err}）\n")
+            continue
+        if not hasattr(mod, "export_env"):
+            print(f"[跳过] {display_name}：无 export_env 方法\n")
+            continue
+        print(f"--- {display_name} ---")
+        try:
+            rc = mod.export_env() or 0
+        except BaseException as e:
+            print(f"[异常] {display_name}：{type(e).__name__}: {e}\n")
+            rc = 1
+        if rc == 0:
+            ok += 1
+        print()
+    print(f"完成：{ok}/{len(TASKS)} 个脚本成功刷新本地登录态"
+          + ("（已写回 .env）" if saving else "（未写回，仅预览）"))
+
+
 def main():
     if "--export-env" in sys.argv:
-        print("本聚合脚本无需导出环境变量；请对单个签到脚本使用 --export-env")
+        export_all()
         return
 
     results = []
