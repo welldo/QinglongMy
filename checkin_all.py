@@ -93,7 +93,9 @@ def run_one(display_name, mod_name):
     """运行单个签到，返回 (display_name, flag, content)。异常被捕获并标注。"""
     mod, err = _import_module(mod_name)
     if mod is None:
-        return display_name, "IMPORT_FAIL", f"⚠️ 模块导入失败，已跳过：{err}"
+        hint = "（trae_checkin 依赖 pycryptodome，请先安装：pip install pycryptodome）" \
+            if mod_name == "trae_checkin" else ""
+        return display_name, "IMPORT_FAIL", f"⚠️ 模块导入失败，已跳过：{err}{hint}"
     try:
         cred = mod.resolve_credentials()
         flag, content = mod.checkin_once(cred)
