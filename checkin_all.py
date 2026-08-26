@@ -160,7 +160,7 @@ def main():
         name, flag, content = run_one(display_name, mod_name)
         results.append((name, flag, content))
         # 实时打印（仅首行，便于日志查看；完整内容见下方汇总）
-        print(f"[{name}] RESULT={flag} | {str(content).splitlines()[0]}")
+        print(f"\n[{name}] RESULT={flag} | {str(content).splitlines()[0]}")
 
     summary = build_summary(results)
     print("\n" + "=" * 50)
