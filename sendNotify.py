@@ -433,7 +433,7 @@ def serverJSecond(title: str, content: str) -> None:
     if not push_config.get("PUSH_KEY_SECOND"):
         print("serverJ My服务的 PUSH_KEY_SECOND 未设置!!\n取消推送")
         return
-    data = {"text": title, "desp": content}
+    data = {"text": title, "desp": content.replace("\n", "\n\n")}
     url = f'https://sctapi.ftqq.com/{push_config.get("PUSH_KEY_SECOND")}.send'
 
     response = requests.post(url, data=data).json()
@@ -448,7 +448,8 @@ def serverJMy(title: str, content: str) -> None:
     if not push_config.get("PUSH_KEY_MY"):
         print("serverJ My服务的 PUSH_KEY_MY 未设置!!\n取消推送")
         return
-    data = {"text": title, "desp": content}
+    # 与 serverJ 保持一致：desp 按 Markdown 渲染，单个 \n 需转成 \n\n 才会分段换行
+    data = {"text": title, "desp": content.replace("\n", "\n\n")}
     url = f'https://sctapi.ftqq.com/{push_config.get("PUSH_KEY_MY")}.send'
 
     response = requests.post(url, data=data).json()

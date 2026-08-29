@@ -106,17 +106,18 @@ def run_one(display_name, mod_name):
 
 
 def build_summary(results):
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    lines = [f"【每日Token签到汇总 · {now}】", ""]
+    now = datetime.now().strftime("%m-%d")
+    # 输出 Markdown：标题 + 每行加粗任务名，便于 server酱 按段渲染换行
+    lines = [f"## {now} Token签到汇总", ""]
     ok = 0
     for name, flag, content in results:
         icon = FLAG_ICON.get(flag, "•")
         first_line = str(content).splitlines()[0] if str(content).strip() else "(空)"
-        lines.append(f"{icon} {name}：{first_line}")
+        lines.append(f"{icon} **{name}**：{first_line}")
         if flag in ("SUCCESS", "ALREADY_TODAY"):
             ok += 1
     lines.append("")
-    lines.append(f"共 {len(results)} 项，成功/已签 {ok} 项")
+    lines.append(f"**共 {len(results)} 项，成功/已签 {ok} 项**")
     return "\n".join(lines)
 
 
