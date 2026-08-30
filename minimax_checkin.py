@@ -6,9 +6,29 @@
 
 ==================== MiniMax Code 自动签到 ====================
 
-签到点（逆向自 MiniMax Code 桌面端 app.asar，MiniMax Agent 客户端）：
-    状态查询  {host}/minimax-cloud/api/v1/signin/status    (GET)
-    领取积分  {host}/minimax-cloud/api/v1/signin/claim      (POST, body {})
+相关端点（逆向自 MiniMax Code 桌面端 app.asar + 本机 api-*.log 实测）：
+    续期登录  {host}/v1/api/user/renewal               (POST, body {}) -> {"data":{"token":"新JWT"}}
+    状态查询  {host}/minimax-cloud/api/v1/signin/status (GET)
+    领取积分  {host}/minimax-cloud/api/v1/signin/claim  (POST, body {})
+
+【先续期再签到（本次核心优化）】
+桌面端每次启动都会调 /v1/api/user/renewal 用旧 token 换新 token（新 token 有效期
+顺延 ~40 天）。本脚本把这一步搬进签到流程：**每次运行先续期，再拿新 token 签到**，
+并把新 token 写回同目录缓存文件 .minimax_token.json（青龙环境里环境变量改不动，
+但脚本目录可写，缓存能让 token 一直保持新鲜，永不续期失败）。
+
+流程：
+    env token ──(有效?)──> renewal ──> 新 token ──> 写回缓存/.env ──> status ──> claim
+                              │
+                              └─ 401/异常 ──> 回落到缓存 token 再试一次 ──> 仍失败则如实上报
+
+【为什么服务器上会 401（本地实测结论）】
+    * 正常 token          -> HTTP 200
+    * 空 / 截断 / 带引号  -> HTTP 401 且响应体为空（与服务器上报的现象完全一致）
+    * x-timestamp 拨快拨慢 24 小时 -> 仍 200（说明**不是**签名/时钟问题）
+    * renewal 用非法 token -> HTTP 401 {"statusInfo":{"code":1000021,"msg":"异常用户访问"}}
+因此 401 基本只可能是 **token 本身不对**（过期/被截断/粘贴时带引号/串号），
+本脚本会在失败信息里直接打印 token 剩余有效期与服务端原始报错，一眼可定位。
 
 【签名机制（逆向 app.asar 结论）】
 桌面端在 axios 请求拦截器中对每个请求计算两套签名头：
@@ -28,19 +48,25 @@
 鉴权头： token: <本地 JWT>（HS256，存于 minimax-agent-config.json -> tokens.accessToken）
          —— 注意 token 仅出现在 HTTP 头，绝不进入签名用的 URL/yy 计算
 
-【方式一 · 推荐：环境变量（脚本默认且唯一读取来源）】
+【方式一 · 推荐：环境变量（脚本默认读取来源）】
 在 .env 或运行环境中设置：
     MINIMAX_TOKEN=<tokens.accessToken>
     MINIMAX_USER_ID=<realUserID>
     MINIMAX_UUID=<设备 uuid，可选，留空则回落脚本内置稳定默认值>
     MINIMAX_DEVICE_ID=<数字设备 id，可选，留空则回落脚本内置稳定默认值>
 脚本【默认只读取上述环境变量】，不再自动读取本机登录态，方便容器 / 跨机 / 青龙部署。
+环境变量值会自动去除首尾空白与误粘贴的引号（青龙面板最常见的 401 元凶）。
 
 【方式二 · 刷新 token：--export-env（仅本机、不进入默认运行链）】
 token 过期时，在本机（已登录 MiniMax Agent 桌面端）执行：
     python minimax_checkin.py --export-env
-会读取本机登录态并打印最新变量；追加 --save 可直接写回 .env：
+会读取本机登录态、先续期再打印最新变量；追加 --save 可直接写回 .env：
     python minimax_checkin.py --export-env --save
+
+【方式三 · 只续期：--renew（任意机器，只要当前 token 还有效）】
+    python minimax_checkin.py --renew            # 续期并打印
+    python minimax_checkin.py --renew --save     # 续期并写回 .env + 缓存
+适合"本机 token 还有效、只想把服务器上的 token 换新的"场景。
 
 本机登录态文件（仅供参考，不参与默认运行）：
     %APPDATA%\\MiniMax Agent\\minimax-agent-config.json  （键 tokens.accessToken）
@@ -55,17 +81,21 @@ token 过期时，在本机（已登录 MiniMax Agent 桌面端）执行：
 import os
 import sys
 import json
+import time
 import hashlib
 import re
+import base64
 import urllib.parse
 from datetime import datetime, timezone
 
 import requests
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # 本地开发时自动加载同目录 .env；已设置的环境变量优先，不受影响
 try:
     from dotenv import load_dotenv
-    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+    load_dotenv(os.path.join(BASE_DIR, ".env"))
 except ImportError:
     pass
 
@@ -79,8 +109,8 @@ except Exception:
 
 def _save_env_values(values: dict):
     """把导出的环境变量写回同目录 .env（仅更新/追加给定 key，保留其它内容）。
-    仅 --export-env --save 时调用。返回写入的变量数（0 表示失败）。"""
-    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    仅 --export-env --save / --renew --save 时调用。返回写入的变量数（0 表示失败）。"""
+    env_path = os.path.join(BASE_DIR, ".env")
     lines = []
     if os.path.isfile(env_path):
         try:
@@ -111,8 +141,13 @@ def _save_env_values(values: dict):
 
 # ===== 端点常量 =====
 HOST = "https://agent.minimax.io"
+RENEW_PATH = "/v1/api/user/renewal"          # 续期登录：旧 token 换新 token
 STATUS_PATH = "/minimax-cloud/api/v1/signin/status"
 CLAIM_PATH = "/minimax-cloud/api/v1/signin/claim"
+
+# 续期得到的新 token 缓存（脚本同目录）。青龙改不动环境变量，但脚本目录可写，
+# 靠这个缓存让 token 每次运行都滚动续期。设 MINIMAX_NO_CACHE=1 可关闭。
+CACHE_FILE = os.path.join(BASE_DIR, ".minimax_token.json")
 
 # 默认本机登录态配置文件（Windows）。可用 MINIMAX_CONFIG_PATH 覆盖。
 DEFAULT_CONFIG_REL = os.path.join("MiniMax Agent", "minimax-agent-config.json")
@@ -211,6 +246,92 @@ def _sign_request(path: str, token: str, params: dict, method: str, body: dict):
     return params, headers, body_str
 
 
+# ===== JWT 本地解析（用于判断 token 是否过期、给出可读诊断） =====
+
+def _b64url_decode(seg: str) -> bytes:
+    return base64.urlsafe_b64decode(seg + "=" * (-len(seg) % 4))
+
+
+def decode_token(token: str):
+    """本地解析 JWT（不校验签名，只读 exp / user.id）。
+    返回 (exp_ts, user_id)；非 JWT 或解析失败返回 (0, "")。"""
+    try:
+        parts = str(token or "").split(".")
+        if len(parts) != 3:
+            return 0, ""
+        payload = json.loads(_b64url_decode(parts[1]).decode("utf-8"))
+        exp = int(payload.get("exp") or 0)
+        uid = str(((payload.get("user") or {}).get("id")) or "")
+        return exp, uid
+    except Exception:
+        return 0, ""
+
+
+def token_exp_text(token: str) -> str:
+    """把 token 有效期翻译成人话，供失败诊断使用。"""
+    exp, _ = decode_token(token)
+    if not exp:
+        return "token 不是合法 JWT（疑似被截断 / 粘贴时带引号 / 复制不全）"
+    delta = exp - time.time()
+    if delta > 0:
+        return f"token 剩余 {delta / 86400:.1f} 天有效"
+    return f"token 已于 {-delta / 86400:.1f} 天前过期，必须重新 --export-env"
+
+
+def clean_env_value(raw: str) -> str:
+    """清洗环境变量：去首尾空白、去误粘贴的成对引号、去零宽/BOM 字符。"""
+    if raw is None:
+        return ""
+    s = str(raw).strip().strip("\ufeff").strip()
+    while len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
+        s = s[1:-1].strip()
+    return s
+
+
+# ===== token 缓存（青龙环境自愈的关键） =====
+
+def _cache_enabled() -> bool:
+    return os.environ.get("MINIMAX_NO_CACHE", "").strip() not in ("1", "true", "True")
+
+
+def load_token_cache() -> str:
+    if not _cache_enabled():
+        return ""
+    try:
+        if not os.path.isfile(CACHE_FILE):
+            return ""
+        with open(CACHE_FILE, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return clean_env_value(data.get("token") or "")
+    except Exception as e:
+        print(f"[warn] 读取 token 缓存失败: {e}")
+        return ""
+
+
+def save_token_cache(token: str, source: str = "renewal") -> bool:
+    if not _cache_enabled() or not token:
+        return False
+    try:
+        with open(CACHE_FILE, "w", encoding="utf-8") as fh:
+            json.dump({"token": token, "source": source,
+                       "updated_at": int(time.time())}, fh)
+        return True
+    except Exception as e:
+        print(f"[warn] 写入 token 缓存失败: {e}")
+        return False
+
+
+def persist_token(token: str, source: str = "renewal") -> list:
+    """续期成功后落盘：缓存（青龙靠它）+ .env（本机靠它）。返回写入位置列表。"""
+    saved = []
+    if save_token_cache(token, source):
+        saved.append("缓存")
+    if os.environ.get("MINIMAX_SAVE_ENV", "1").strip() not in ("0", "false", "False"):
+        if _save_env_values({"MINIMAX_TOKEN": token}):
+            saved.append(".env")
+    return saved
+
+
 # ===== 凭据解析 =====
 
 def read_local_credential():
@@ -247,31 +368,67 @@ def load_persistent_device():
     """返回稳定的 uuid 与数字 device_id。
     优先取环境变量 MINIMAX_UUID / MINIMAX_DEVICE_ID（便于跨机/容器部署）；
     未设置时回落到脚本内写死的稳定常量。不再读写任何缓存文件。"""
-    uid = os.environ.get("MINIMAX_UUID", "").strip()
-    did = os.environ.get("MINIMAX_DEVICE_ID", "").strip()
+    uid = clean_env_value(os.environ.get("MINIMAX_UUID", ""))
+    did = clean_env_value(os.environ.get("MINIMAX_DEVICE_ID", ""))
     if uid and did:
         return uid, did
     return (uid or _DEFAULT_UUID), (did or _DEFAULT_DEVICE_ID)
 
 
+def _token_alive(token: str) -> bool:
+    """token 非空且（若是 JWT）未过期。"""
+    if not token:
+        return False
+    exp, _ = decode_token(token)
+    if exp == 0:
+        return True          # 非 JWT，交给服务端判断
+    return exp - time.time() > 60
+
+
 def resolve_credentials():
-    """仅读取环境变量，返回凭据 dict（永不读本机登录态）。
-    未设置 MINIMAX_TOKEN 时返回空 token，checkin 阶段判为 NO_CREDENTIAL。
-    刷新 token 请用 `python minimax_checkin.py --export-env`。"""
+    """读取环境变量（并按需回落到续期缓存），返回凭据 dict。
+    - env token 有效  -> 直接用（先 env 后缓存的顺序在 checkin 里兜底重试）
+    - env token 缺失/已过期 -> 用缓存里上次续期成功的 token
+    - 都没有          -> 原样返回，由 checkin 阶段报 NO_CREDENTIAL / AUTH_EXPIRED"""
+    env_token = clean_env_value(os.environ.get("MINIMAX_TOKEN", ""))
+    cache_token = load_token_cache()
+    token = env_token
+    source = "env"
+    if not _token_alive(env_token) and _token_alive(cache_token):
+        token, source = cache_token, "cache"
     return {
-        "token": os.environ.get("MINIMAX_TOKEN", "").strip(),
-        "user_id": os.environ.get("MINIMAX_USER_ID", "").strip(),
+        "token": token,
+        "env_token": env_token,
+        "cache_token": cache_token,
+        "source": source,
+        "user_id": clean_env_value(os.environ.get("MINIMAX_USER_ID", "")),
         "user_name": "",
         "mail": "",
     }
 
 
+def _candidate_tokens(cred: dict):
+    """生成待尝试的 token 列表 [(token, 来源标签)]，已过期的排后面、去重。"""
+    env_t = clean_env_value(cred.get("env_token") or cred.get("token") or "")
+    cache_t = clean_env_value(cred.get("cache_token") or "")
+    ordered = []
+    if _token_alive(env_t):
+        ordered.append((env_t, "环境变量"))
+    if cache_t and cache_t != env_t and _token_alive(cache_t):
+        ordered.append((cache_t, "缓存"))
+    for t, tag in ((env_t, "环境变量"), (cache_t, "缓存")):
+        if t and t not in [x[0] for x in ordered]:
+            ordered.append((t, tag))
+    return ordered
+
+
 # ===== 业务解析 =====
 
 AUTH_FAIL_KEYWORDS = ("unauthorized", "token", "expired", "not login",
-                      "not logged", "登录", "鉴权", "invalid")
+                      "not logged", "登录", "鉴权", "invalid", "异常用户")
 RATE_LIMIT_KEYWORDS = ("频繁", "frequent", "too many", "太多", "稍后再试",
                        "繁忙", "busy", "limit")
+
 
 def api_succeeded(data: dict) -> bool:
     if not isinstance(data, dict):
@@ -290,6 +447,19 @@ def api_succeeded(data: dict) -> bool:
     return str(data.get("status", "")).lower() == "success"
 
 
+def server_message(data) -> str:
+    """从各种响应结构里抠出服务端给的文案，便于如实上报。"""
+    if not isinstance(data, dict):
+        return ""
+    si = data.get("statusInfo") or {}
+    if isinstance(si, dict) and si.get("message"):
+        return str(si["message"])
+    br = data.get("base_resp") or {}
+    if isinstance(br, dict) and br.get("status_msg") and br.get("status_code") not in (0, None):
+        return f"{br.get('status_msg')}(code={br.get('status_code')})"
+    return str(data.get("message") or data.get("msg") or "")
+
+
 def is_auth_failure(http_status: int, data) -> bool:
     if http_status in (401, 403):
         return True
@@ -301,6 +471,13 @@ def is_auth_failure(http_status: int, data) -> bool:
             return True
     except (TypeError, ValueError):
         pass
+    si = data.get("statusInfo") or {}
+    if isinstance(si, dict):
+        try:
+            if int(str(si.get("code"))) in (1000021, 1000022, 1000023):
+                return True
+        except (TypeError, ValueError):
+            pass
     msg = str(data.get("message") or data.get("msg") or "").lower()
     if any(k in msg for k in RATE_LIMIT_KEYWORDS):
         return False
@@ -336,66 +513,158 @@ def api_call(host, token, params, path, method="GET", body=None, timeout=30):
         return 0, {"error": str(e)}
 
 
-def checkin_once(cred: dict):
-    """执行单次签到，返回 (结果标记, 通知文本)。不做重试：结果如实上报。"""
-    cred = cred or {}
-    token = cred.get("token", "").strip()
-    if not token:
-        return "NO_CREDENTIAL", ("未获取到 MiniMax 登录态，请设置环境变量 MINIMAX_TOKEN / MINIMAX_USER_ID"
-                                 "（或运行 python minimax_checkin.py --export-env --save 刷新）")
-    tag = cred.get("user_name") or cred.get("user_id") or "未知用户"
+def renew_token(token: str, params: dict):
+    """续期登录：用旧 token 换新 token。返回 (新token, http状态码, 服务端文案)。
+    失败时新 token 为空串。"""
+    code, data = api_call(HOST, token, params, RENEW_PATH, method="POST", body={})
+    if isinstance(data, dict):
+        new_token = ((data.get("data") or {}).get("token") or "").strip()
+        if new_token:
+            return new_token, code, ""
+    return "", code, server_message(data) or (str((data or {}).get("error")) if isinstance(data, dict) else "")
 
+
+def _diag(token: str, http_status: int, data) -> str:
+    """把失败原因拼成一句人话，供通知文本直接展示。"""
+    bits = []
+    if http_status:
+        bits.append(f"HTTP {http_status}")
+    else:
+        bits.append("网络异常（无响应）")
+    msg = server_message(data) or str((data or {}).get("error") or "")
+    if msg:
+        bits.append(msg)
+    bits.append(token_exp_text(token))
+    return "；".join(bits)
+
+
+def _try_checkin(user_id: str, token: str, source: str):
+    """用指定 token 走一遍「续期 -> 状态 -> 领取」。返回 (flag, content)。"""
     uid, did = load_persistent_device()
-    base_params = build_device_params(cred.get("user_id", ""), uid, did)
+    base_params = build_device_params(user_id, uid, did)
 
-    # 1) 状态查询（GET）
+    # 1) 先续期（等价于重新登录一次，新 token 有效期顺延 ~40 天）
+    renewed = ""
+    new_token, rcode, rmsg = renew_token(token, base_params)
+    if new_token:
+        renewed = new_token
+        token = new_token
+        where = persist_token(new_token, "renewal")
+        print(f"[miniMax] 续期成功（来源 {source}），已写回：{'/'.join(where) or '仅内存'}")
+    elif rcode:
+        print(f"[miniMax] 续期失败：HTTP {rcode} {rmsg}（沿用原 token 继续尝试）")
+
+    # 2) 状态查询（GET）
     sc, sb = api_call(HOST, token, base_params, STATUS_PATH, method="GET")
     if is_auth_failure(sc, sb):
-        return "AUTH_EXPIRED", f"⚠️ {tag} 鉴权失败（HTTP {sc}），请在 MiniMax Agent 客户端重新登录后重试"
+        return "AUTH_EXPIRED", f"⚠️ 鉴权失败：{_diag(token, sc, sb)}｜token 来源：{source}"
     if not api_succeeded(sb):
-        msg = (sb or {}).get("message") or (sb or {}).get("msg") or json.dumps(sb, ensure_ascii=False)[:150]
-        return "STATUS_ERR", f"⚠️ {tag} 状态查询异常：HTTP {sc} {msg}"
+        msg = server_message(sb) or json.dumps(sb, ensure_ascii=False)[:150]
+        return "STATUS_ERR", f"⚠️ 状态查询异常：HTTP {sc} {msg}"
 
     # 解析今日签到状态：days[] 中 is_today=true 的那天，status==3 表示已领取
     days = (((sb or {}).get("data") or {}).get("days")) or []
     today = next((d for d in days if d.get("is_today")), None)
     today_done = bool(today and today.get("status") == 3)
     if today_done:
-        return "ALREADY_TODAY", f"ℹ️ {tag} 今日已签到（第 {today.get('day_no')} 天）"
+        extra = "（已自动续期 token）" if renewed else ""
+        return "ALREADY_TODAY", f"ℹ️ 今日已签到（第 {today.get('day_no')} 天）{extra}"
 
-    # 2) 领取（POST，body {}）
+    # 3) 领取（POST，body {}）
     cc, cb = api_call(HOST, token, base_params, CLAIM_PATH, method="POST", body={})
     if is_auth_failure(cc, cb):
-        return "AUTH_EXPIRED", f"⚠️ {tag} 鉴权失败（HTTP {cc}），请在 MiniMax Agent 客户端重新登录后重试"
+        return "AUTH_EXPIRED", f"⚠️ 鉴权失败：{_diag(token, cc, cb)}｜token 来源：{source}"
     if is_rate_limited(cc, cb):
-        msg = (cb or {}).get("message") or (cb or {}).get("msg") or json.dumps(cb, ensure_ascii=False)[:120]
-        return "RATE_LIMITED", f"⏳ {tag} 服务端限频：{msg}，建议错峰或稍后重试"
+        msg = server_message(cb) or json.dumps(cb, ensure_ascii=False)[:120]
+        return "RATE_LIMITED", f"⏳ 服务端限频：{msg}，建议错峰或稍后重试"
     if not api_succeeded(cb):
-        msg = (cb or {}).get("message") or (cb or {}).get("msg") or json.dumps(cb, ensure_ascii=False)[:150]
-        return "FAIL", f"⚠️ {tag} 领取未成功：HTTP {cc} {msg}"
+        msg = server_message(cb) or json.dumps(cb, ensure_ascii=False)[:150]
+        return "FAIL", f"⚠️ 领取未成功：HTTP {cc} {msg}"
 
     # 解析领取结果：claim_result 1=新领取成功，2=今日已领取
     cdata = (cb or {}).get("data") or {}
     claim_result = cdata.get("claim_result")
     points = cdata.get("points")
+    extra = "（已自动续期 token，下次仍可用）" if renewed else ""
     if claim_result == 2:
-        return "ALREADY_TODAY", f"ℹ️ {tag} 今日已签到（claim_result=2）"
+        return "ALREADY_TODAY", f"ℹ️ 今日已签到（claim_result=2）{extra}"
     if claim_result == 1 or points is not None:
         gain = f"本次 +{points} 积分" if points else "签到成功"
-        return "SUCCESS", f"✅ {tag} {gain}（第 {cdata.get('day_no')} 天）"
-    return "SUCCESS", f"✅ {tag} 领取成功"
+        return "SUCCESS", f"✅ {gain}（第 {cdata.get('day_no')} 天）{extra}"
+    return "SUCCESS", f"✅ 领取成功{extra}"
+
+
+def checkin_once(cred: dict):
+    """执行签到，返回 (结果标记, 通知文本)。
+
+    策略：先续期（相当于先登录）再签到；若某个 token 鉴权失败，自动换另一个
+    候选 token（环境变量 / 上次续期缓存）重试，全部失败才如实上报。
+    """
+    cred = cred or {}
+    user_id = clean_env_value(cred.get("user_id", ""))
+    tag = cred.get("user_name") or user_id or "未知用户"
+
+    candidates = _candidate_tokens(cred)
+    if not candidates:
+        return "NO_CREDENTIAL", ("未获取到 MiniMax 登录态，请设置环境变量 MINIMAX_TOKEN / MINIMAX_USER_ID"
+                                 "（或运行 python minimax_checkin.py --export-env --save 刷新）")
+
+    last = ("NO_CREDENTIAL", "未获取到 MiniMax 登录态")
+    for token, source in candidates:
+        try:
+            flag, content = _try_checkin(user_id, token, source)
+        except Exception as e:                       # 单个候选异常不中断其余尝试
+            flag, content = "ERROR", f"⚠️ 执行异常（token 来源：{source}）：{type(e).__name__}: {e}"
+            print(f"[miniMax] {content}")
+        if flag in ("SUCCESS", "ALREADY_TODAY", "RATE_LIMITED"):
+            return flag, _with_tag(tag, content)
+        last = (flag, content)
+        print(f"[miniMax] token 来源 {source} 失败：RESULT={flag} | {content}")
+
+    # 全部候选都失败：补一条可操作提示
+    flag, content = last
+    if flag == "AUTH_EXPIRED":
+        content += "｜处理：①本机 python minimax_checkin.py --export-env --save 重新导出；" \
+                   "②把新的 MINIMAX_TOKEN 填回青龙（注意别带引号）；" \
+                   "③若确认 token 无误仍 401，多为服务器出口 IP 被风控"
+    return flag, content
+
+
+_LEADING_ICONS = ("✅", "ℹ️", "⏳", "⚠️", "❌", "🎉")
+
+
+def _with_tag(tag: str, content: str) -> str:
+    """把用户标识插到图标后面：'✅ 本次 +400 积分' -> '✅ 547901267608952833 本次 +400 积分'。"""
+    tag = str(tag or "").strip()
+    content = str(content or "")
+    if not tag:
+        return content
+    for icon in _LEADING_ICONS:                       # 开头是图标时插到图标后，保持视觉一致
+        if content.startswith(icon):
+            return f"{icon} {tag} {content[len(icon):].lstrip()}"
+    return f"{tag} {content}"
 
 
 def export_env():
     """--export-env：从本机登录态读取并打印环境变量（token 过期时用来刷新）。
-    追加 --save 可直接写回同目录 .env。"""
+    读取后会先走一次续期，导出的是**最新** token；追加 --save 可直接写回 .env。"""
     c = read_local_credential()
     if not c:
         print("未发现 MiniMax 登录态，请先在本机登录 MiniMax Agent 桌面端")
         return 1
     uid, did = load_persistent_device()
+    params = build_device_params(c["user_id"], uid, did)
+
+    token = c["token"]
+    new_token, rcode, rmsg = renew_token(token, params)
+    if new_token:
+        token = new_token
+        print(f"# 已续期：token 有效期顺延（{token_exp_text(token)}）")
+    elif rcode:
+        print(f"# 续期未成功（HTTP {rcode} {rmsg}），导出本机现有 token")
+
     values = {
-        "MINIMAX_TOKEN": c["token"],
+        "MINIMAX_TOKEN": token,
         "MINIMAX_USER_ID": c["user_id"],
         "MINIMAX_UUID": uid,
         "MINIMAX_DEVICE_ID": did,
@@ -408,13 +677,38 @@ def export_env():
         n = _save_env_values(values)
         if n:
             print(f"# 已将上述 {n} 个变量写回 .env")
+        save_token_cache(token, "export-env")
+    return 0
+
+
+def run_renew():
+    """--renew：只续期 token（要求当前 token 仍有效），并写回缓存/.env。"""
+    cred = resolve_credentials()
+    token = clean_env_value(cred.get("token") or "")
+    if not token:
+        print("未找到可用 token：请先设置 MINIMAX_TOKEN，或在本机执行 --export-env --save")
+        return 1
+    uid, did = load_persistent_device()
+    params = build_device_params(cred.get("user_id", ""), uid, did)
+
+    print(f"# 当前 {token_exp_text(token)}")
+    new_token, rcode, rmsg = renew_token(token, params)
+    if not new_token:
+        print(f"续期失败：HTTP {rcode} {rmsg}｜{token_exp_text(token)}")
+        return 1
+    where = persist_token(new_token, "renew")
+    print(new_token)
+    print(f"# 续期成功：{token_exp_text(new_token)}；已写回 {'/'.join(where) or '仅内存'}")
     return 0
 
 
 def main():
-    # python minimax_checkin.py --export-env  仅导出环境变量后退出
+    # python minimax_checkin.py --export-env [--save]  仅导出环境变量后退出
     if "--export-env" in sys.argv:
         sys.exit(export_env())
+    # python minimax_checkin.py --renew [--save]       仅续期 token 后退出
+    if "--renew" in sys.argv:
+        sys.exit(run_renew())
 
     title = "MiniMax Code 每日签到"
     cred = resolve_credentials()
@@ -425,11 +719,15 @@ def main():
 
     print(f"RESULT={flag} | {content}")
 
-    if _HAS_NOTIFY:
+    # 本地调试不想刷推送时：CHECKIN_NO_NOTIFY=1
+    no_push = os.environ.get("CHECKIN_NO_NOTIFY", "").strip() in ("1", "true", "True")
+    if _HAS_NOTIFY and not no_push:
         try:
             sendNotify.serverJMy(title, content)
         except Exception as e:
             print(f"[warn] 通知发送失败: {e}")
+    elif no_push:
+        print("[info] CHECKIN_NO_NOTIFY 已设置，跳过推送")
 
 
 if __name__ == "__main__":

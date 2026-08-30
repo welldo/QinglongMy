@@ -19,7 +19,7 @@
 * [douban_spider](douban_spider.py) 豆瓣小组（上海租房版demo）
 * [workbuddy_checkin](workbuddy_checkin.py) WorkBuddy 每日积分自动签到（100积分/天，连续第7天1000积分），**默认只读环境变量**，`--export-env`（或 `--export-env --save` 写回 .env）可读取本机登录态刷新 token，幂等可重复运行
 * [trae_checkin](trae_checkin.py) Trae Work 每日积分自动签到，**默认只读环境变量**（不再自动读本机），`--export-env` 读取本机登录态解密导出，`--export-env --save` 可写回 .env 刷新
-* [minimax_checkin](minimax_checkin.py) MiniMax Code 每日积分自动签到（400积分/天，第4、7天1000积分），**默认只读环境变量**（不再自动读本机），逆向 `yy`/`x-signature` 签名，`--export-env` 读取本机登录态导出，`--export-env --save` 可写回 .env 刷新
+* [minimax_checkin](minimax_checkin.py) MiniMax Code 每日积分自动签到（400积分/天，第4、7天1000积分），**默认只读环境变量**（不再自动读本机），逆向 `yy`/`x-signature` 签名；**每次运行先调 `/v1/api/user/renewal` 续期（相当于先登录）再签到**，新 token 自动写回 `.minimax_token.json` 缓存（青龙环境靠它自愈，token 永不失效）；环境变量会自动去除首尾空白与误粘的引号（青龙 401 头号元凶）；`--export-env`（先续期再导出）/`--renew`（仅续期）配合 `--save` 可写回 .env 刷新
 * [checkin_all](checkin_all.py) 聚合签到（推荐）：**只需设一个定时**，依次跑 WorkBuddy / Trae Work / MiniMax Code 三个签到，合并结果后**只发一次推送**。各子脚本的单独定时可停用/删除。另支持 `python checkin_all.py --export-env --save` **一条命令批量刷新三个 token**（等价逐个执行各子脚本的 `--export-env --save`），要求本机三个桌面端均已登录
 
 ## 安装依赖库
@@ -87,15 +87,22 @@ export TRAE_USER_ID=
 
 ## MiniMax Code 每日签到（minimax_checkin.py）
 # 脚本【默认只读取以下环境变量】，不自动读取本机登录态
+# 【先续期再签到】每次运行先调 /v1/api/user/renewal 换新 token（有效期顺延 ~40 天），
+#   新 token 自动写回脚本同目录缓存 .minimax_token.json（青龙改不动环境变量，靠缓存自愈）
+# 填 token 时千万别带引号（青龙面板最常见坑，会直接 401）；脚本会自动去除首尾空白与配对引号
 # token 失效/过期时：先去 MiniMax Agent 客户端重新登录（让其写回新 token），再在本机执行：
 #   python minimax_checkin.py --export-env --save  即可把最新 token/设备参数写回 .env
+# 只想续期现有 token（token 尚有效即可，任意机器）：
+#   python minimax_checkin.py --renew --save
 export MINIMAX_TOKEN=
 export MINIMAX_USER_ID=
-# 可选：设备身份参数，留空时回落到脚本内写死的稳定默认值（不再读写任何缓存文件）
+# 可选：设备身份参数，留空时回落到脚本内写死的稳定默认值
 export MINIMAX_UUID=
 export MINIMAX_DEVICE_ID=
 # 可选：覆盖本机登录态配置文件路径（仅 --export-env 读取时使用，默认 %APPDATA%\MiniMax Agent\minimax-agent-config.json）
 export MINIMAX_CONFIG_PATH=
+# 可选：设 1 关闭 token 缓存文件；设 MINIMAX_SAVE_ENV=0 则只写缓存不改写 .env
+export MINIMAX_NO_CACHE=
    ```
 
 若没有使用load_dotenv()，所有新增PUSH_KEY需要在[sendNotify](sendNotify.py)的push_config中配置key名称后才能生效

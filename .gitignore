@@ -162,3 +162,5 @@ log_*.md
 *.db
 temp/
 .workbuddy
+# MiniMax 续期 token 缓存（含敏感凭据，禁止入库）
+.minimax_token.json
