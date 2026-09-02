@@ -582,18 +582,21 @@ def api_call(host, token, params, path, method="GET", body=None, timeout=30):
         return sc, sb
 
     sc, sb = _do_request(host, token, params, path, method, body, timeout, None, verify=True)
-    if sc != 0:
+    # 正常响应（非连接失败、非疑似拦截网关的 401）直接返回
+    if sc not in (0, 401):
         return sc, sb
 
-    # 连接层失败：疑似 DNS 污染，尝试 DoH 真实 IP 直连
+    # 连接层失败(sc==0) 或 疑似被拦截网关返回 401：改用 DoH 解析真实 IP 直连
+    # （部分被管控网关会伪装成「HTTP 401」而非 TLS 错误，因此一并触发回退）
+    reason = "连接失败（疑似 DNS 污染到假 IP）" if sc == 0 else "HTTP 401（疑似被拦截网关伪响应）"
     err0 = (sb or {}).get("error") if isinstance(sb, dict) else str(sb)
-    print(f"[miniMax] 域名直连失败（疑似 DNS 污染到假 IP）：{err0}；尝试 DoH 解析真实 IP 绕过…")
+    print(f"[miniMax] 域名直连{reason}：{err0}；尝试 DoH 解析真实 IP 绕过…")
     last_err = err0
     for ip in _resolve_real_ips(host):
         sc, sb = _do_request(f"https://{ip}", token, params, path, method, body, timeout, domain, verify=False)
         if sc != 0:
             _RESOLVED[domain] = ip
-            print(f"[miniMax] 已通过真实 IP {ip} 绕过 DNS 污染")
+            print(f"[miniMax] 已通过真实 IP {ip} 绕过（{reason}）")
             return sc, sb
         last_err = (sb or {}).get("error") if isinstance(sb, dict) else str(sb)
     return 0, {"error": f"DNS 污染且 DoH/兜底 IP 均不可达：{last_err}"}

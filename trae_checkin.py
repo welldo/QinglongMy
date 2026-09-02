@@ -258,14 +258,26 @@ def _der_encode_signature(r, s):
 
 
 def _extract_private_d(private_pem: str) -> int:
-    """从 P-256 PKCS#8 私钥 PEM 中提取私钥整数 d（仅依赖标准库）。"""
-    der = base64.b64decode(private_pem.strip().split("-----")[2].replace("\n", ""))
+    """从 P-256 PKCS#8 私钥 PEM 中提取私钥整数 d（仅依赖标准库）。
+
+    兼容带/不带 -----BEGIN/END----- 标记、带或不带换行的各种存储形式
+    （qinglong 等面板粘贴多行 PEM 时可能丢失标记或换行，只剩 base64 主体）。"""
+    import re as _re
+    s = (private_pem or "").strip()
+    s = _re.sub(r"-----[A-Z0-9 ]+-----", "", s)   # 去掉 PEM 头尾标记
+    s = _re.sub(r"\s+", "", s)                    # 去掉所有空白（含换行/回车/空格）
+    if not s:
+        raise ValueError("设备私钥 PEM 为空或缺少主体（请重新运行 python trae_checkin.py --export-keys --save 引导）")
+    try:
+        der = base64.b64decode(s)
+    except Exception as e:
+        raise ValueError(f"设备私钥 base64 解析失败（PEM 可能被截断/格式错误）: {e}")
     i = der.find(b"\x02\x01\x01")          # 内层 SEQUENCE 的 version INTEGER = 1
     if i < 0:
-        raise ValueError("无法定位 EC 私钥结构")
+        raise ValueError("无法定位 EC 私钥结构（PEM 可能不完整，请重新引导）")
     j = der.find(b"\x04\x20", i)          # 紧跟其后的 32 字节 OCTET STRING 即私钥 d
     if j < 0:
-        raise ValueError("无法定位私钥 d 的 OCTET STRING")
+        raise ValueError("无法定位私钥 d 的 OCTET STRING（PEM 可能不完整，请重新引导）")
     return int.from_bytes(der[j + 2:j + 2 + 32], "big")
 
 
@@ -369,7 +381,11 @@ def exchange_token(cred: dict):
     mid = cred.get("machine_id", "").strip()
     if not (refresh and priv and pub and did):
         return False, None, "缺少 refreshToken / 设备私钥材料（请先运行 python trae_checkin.py --export-keys --save 引导）"
-    proof = build_device_proof(refresh, priv)
+    try:
+        proof = build_device_proof(refresh, priv)
+    except Exception as e:
+        return False, None, (f"设备证明生成失败（设备私钥材料可能无效，"
+                              f"请重新运行 python trae_checkin.py --export-keys --save 引导）: {e}")
     body = {
         "ClientID": CLIENT_ID,
         "ClientSecret": "",
