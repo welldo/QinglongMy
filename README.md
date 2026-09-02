@@ -108,6 +108,13 @@ export TRAE_MACHINE_ID=
 #      （renewal 不校验 user_id，故表现为「续期成功但签到 401」）。
 #   ③ 若 UDP/53 与 DoH 均不可达，可设 MINIMAX_REAL_IP=<真实IPv4> 强制指定（本机
 #      `nslookup agent.minimax.io 223.5.5.5` 取得最新边缘 IP）。
+#   ④ 出口被透明 TLS 网关【全阻断】（所有真实 IP 都 nginx 404、DoH 全超时）时，可经 VLESS 代理
+#      干净出网：脚本会用 xray-core 在本地拉起 HTTP 代理(127.0.0.1:10808)，再让请求走它。
+#      - 服务器需装 xray-core（bash <(curl -L https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh)）。
+#      - 二选一（优先级高者优先）：
+#          export MINIMAX_VLESS='vless://<uuid>@<host>:<port>?security=tls&type=ws&host=<host>&sni=<host>&path=%2F&fp=chrome#tag'
+#          export MINIMAX_PROXY='http://127.0.0.1:10808'   # 你自己起好 xray/v2ray 时直接用这个
+#      - 注意 MINIMAX_VLESS 含 @ # ? 等字符，config.sh 里务必用【单引号】包裹。
 # token 失效/过期时：先去 MiniMax Agent 客户端重新登录（让其写回新 token），再在本机执行：
 #   python minimax_checkin.py --export-env --save  即可把最新 token/设备参数写回 .env
 # 只想续期现有 token（token 尚有效即可，任意机器）：
