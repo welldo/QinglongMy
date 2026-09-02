@@ -149,7 +149,7 @@ STATUS_PATH = "/minimax-cloud/api/v1/signin/status"
 CLAIM_PATH = "/minimax-cloud/api/v1/signin/claim"
 
 # 续期得到的新 token 缓存（脚本同目录）。青龙改不动环境变量，但脚本目录可写，
-# 靠这个缓存让 token 每次运行都滚动续期。设 MINIMAX_NO_CACHE=1 可关闭。
+# 靠这个缓存让 token 每次运行都滚动续期。
 CACHE_FILE = os.path.join(BASE_DIR, ".minimax_token.json")
 
 # 默认本机登录态配置文件（Windows）。可用 MINIMAX_CONFIG_PATH 覆盖。
@@ -291,15 +291,9 @@ def clean_env_value(raw: str) -> str:
     return s
 
 
-# ===== token 缓存（青龙环境自愈的关键） =====
-
-def _cache_enabled() -> bool:
-    return os.environ.get("MINIMAX_NO_CACHE", "").strip() not in ("1", "true", "True")
-
+# ===== token 缓存（青龙环境自愈的关键，始终启用） =====
 
 def load_token_cache() -> str:
-    if not _cache_enabled():
-        return ""
     try:
         if not os.path.isfile(CACHE_FILE):
             return ""
@@ -312,7 +306,7 @@ def load_token_cache() -> str:
 
 
 def save_token_cache(token: str, source: str = "renewal") -> bool:
-    if not _cache_enabled() or not token:
+    if not token:
         return False
     try:
         with open(CACHE_FILE, "w", encoding="utf-8") as fh:
@@ -329,9 +323,8 @@ def persist_token(token: str, source: str = "renewal") -> list:
     saved = []
     if save_token_cache(token, source):
         saved.append("缓存")
-    if os.environ.get("MINIMAX_SAVE_ENV", "1").strip() not in ("0", "false", "False"):
-        if _save_env_values({"MINIMAX_TOKEN": token}):
-            saved.append(".env")
+    if _save_env_values({"MINIMAX_TOKEN": token}):
+        saved.append(".env")
     return saved
 
 

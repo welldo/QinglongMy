@@ -118,8 +118,6 @@ export MINIMAX_DEVICE_ID=
 export MINIMAX_CONFIG_PATH=
 # 可选：出网代理（出口被网关阻断时用到；默认直连）。由 MINIMAX_SUB 指定 VLESS 订阅地址
 export MINIMAX_SUB=
-# 可选：设 1 关闭 token 缓存文件；设 MINIMAX_SAVE_ENV=0 则只写缓存不改写 .env
-export MINIMAX_NO_CACHE=
    ```
 
 若没有使用load_dotenv()，所有新增PUSH_KEY需要在[sendNotify](sendNotify.py)的push_config中配置key名称后才能生效
