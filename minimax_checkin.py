@@ -112,7 +112,8 @@ except Exception:
 
 def _save_env_values(values: dict):
     """把导出的环境变量写回同目录 .env（仅更新/追加给定 key，保留其它内容）。
-    仅 --export-env --save / --renew --save 时调用。返回写入的变量数（0 表示失败）。"""
+    仅 --export-env --save（本机开发者显式刷新 .env）时调用；自动续期不写 .env。
+    返回写入的变量数（0 表示失败）。"""
     env_path = os.path.join(BASE_DIR, ".env")
     lines = []
     if os.path.isfile(env_path):
@@ -319,12 +320,10 @@ def save_token_cache(token: str, source: str = "renewal") -> bool:
 
 
 def persist_token(token: str, source: str = "renewal") -> list:
-    """续期成功后落盘：缓存（青龙靠它）+ .env（本机靠它）。返回写入位置列表。"""
+    """续期成功后落盘：仅写缓存文件（青龙靠它自愈）。返回写入位置列表。"""
     saved = []
     if save_token_cache(token, source):
         saved.append("缓存")
-    if _save_env_values({"MINIMAX_TOKEN": token}):
-        saved.append(".env")
     return saved
 
 
