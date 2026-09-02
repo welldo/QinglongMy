@@ -166,3 +166,5 @@ temp/
 .minimax_token.json
 # Trae 续期缓存 .trae_token.json（含设备 ECDSA 私钥，禁止入库）
 .trae_token.json
+# .env 备份（含敏感凭据，禁止入库）
+.env.bak.*

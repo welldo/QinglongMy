@@ -70,12 +70,41 @@ from datetime import datetime, timezone
 
 import requests
 
-# 本地开发时自动加载同目录 .env；已设置的环境变量优先，不受影响
+# 本地开发时自动加载同目录 .env；已设置的环境变量优先，不受影响。
+# 不依赖 python-dotenv 第三方库（很多服务器/青龙环境没装，会导致 .env 完全不加载）。
 try:
     from dotenv import load_dotenv
-    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+    _HAS_DOTENV = True
 except ImportError:
-    pass
+    _HAS_DOTENV = False
+
+
+def _load_env_file_simple():
+    """纯标准库解析同目录 .env（python-dotenv 不可用时的兜底）。不覆盖已设环境变量。"""
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.isfile(p):
+        return
+    try:
+        with open(p, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k, v = k.strip(), v.strip()
+                if not k or k in os.environ:
+                    continue
+                os.environ[k] = v.strip('"').strip("'")
+    except Exception as e:
+        print(f"[warn] 解析 .env 失败: {e}")
+
+
+if _HAS_DOTENV:
+    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+else:
+    _load_env_file_simple()
 
 try:
     from Crypto.Cipher import AES

@@ -30,6 +30,16 @@
 因此 401 基本只可能是 **token 本身不对**（过期/被截断/粘贴时带引号/串号），
 本脚本会在失败信息里直接打印 token 剩余有效期与服务端原始报错，一眼可定位。
 
+【DNS 污染（服务器/被管控网络跑总失败的真正元凶）】
+实测发现：在被管控的服务器/网关上，`agent.minimax.io` 会被本地 DNS 解析到假 IP
+（如 `198.20.0.x` 拦截网关，连接时 TLS 证书不匹配），表现为「连不上 / 偶发 401」，
+**与 token 是否过期无关**（token 明明还有几十天有效却连不到真服务器）。
+本脚本已内置【反 DNS 污染】回退：默认域名直连；一旦连接层失败，自动用 DoH
+（dns.google，直连 8.8.8.8:443，不受本地污染 DNS 影响）解析出 Akamai 真实边缘 IP，
+再以「真实 IP 直连 + Host 头=域名」绕过。如 DoH 也不可达，可手动设置环境变量
+MINIMAX_REAL_IP=<真实IPv4> 强制指定（可在本机 `nslookup agent.minimax.io 8.8.8.8` 或
+通过 DoH 取得）。
+
 【签名机制（逆向 app.asar 结论）】
 桌面端在 axios 请求拦截器中对每个请求计算两套签名头：
 
@@ -89,15 +99,55 @@ import urllib.parse
 from datetime import datetime, timezone
 
 import requests
+import urllib3
+
+# MiniMax 域名在某些网络环境（如被管控的服务器/网关）会被 DNS 污染到假 IP，
+# 导致连接失败。绕过方案：连接层失败时改用 DoH 动态解析真实 IP 直连（见 api_call）。
+# 直连 IP 时 SNI 与证书 CN 不匹配，需关闭证书校验（仅跳过校验，Host 头仍指向真实域名）。
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# 本地开发时自动加载同目录 .env；已设置的环境变量优先，不受影响
+# 本地开发时自动加载同目录 .env；已设置的环境变量优先，不受影响。
+# 注意：不依赖 python-dotenv 第三方库（很多服务器/青龙环境没装，会导致 .env 完全不加载、
+#       进而 MINIMAX_USER_ID 缺失使 status 接口 401）。库可用时优先用库，否则用内置解析兜底。
 try:
     from dotenv import load_dotenv
-    load_dotenv(os.path.join(BASE_DIR, ".env"))
+    _HAS_DOTENV = True
 except ImportError:
-    pass
+    _HAS_DOTENV = False
+
+
+def _load_env_file_simple():
+    """纯标准库解析同目录 .env（python-dotenv 不可用时的兜底）。
+    规则对齐 dotenv 默认：不覆盖已存在的系统环境变量；去首尾空白与成对引号。"""
+    p = os.path.join(BASE_DIR, ".env")
+    if not os.path.isfile(p):
+        return
+    try:
+        with open(p, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k, v = k.strip(), v.strip()
+                if not k:
+                    continue
+                if k in os.environ:        # 已设置的环境变量优先，不被 .env 覆盖
+                    continue
+                v = v.strip('"').strip("'")
+                os.environ[k] = v
+    except Exception as e:
+        print(f"[warn] 解析 .env 失败: {e}")
+
+
+if _HAS_DOTENV:
+    load_dotenv(os.path.join(BASE_DIR, ".env"))
+else:
+    _load_env_file_simple()
 
 # 通知模块（同目录 sendNotify.py）；缺失则降级为仅打印
 try:
@@ -493,24 +543,96 @@ def is_rate_limited(http_status: int, data) -> bool:
     return any(k in msg for k in RATE_LIMIT_KEYWORDS)
 
 
-def api_call(host, token, params, path, method="GET", body=None, timeout=30):
-    """带签名的请求：计算签名 -> 发送 -> 返回 (status_code, json_or_raw)。"""
+# ===== 反 DNS 污染：连接失败时改用 DoH 动态解析真实 IP 直连 =====
+# 某些网络（被管控的服务器/网关）会把 agent.minimax.io 解析到假 IP（如 198.20.0.x 拦截网关），
+# 导致连接失败。此时用 DoH（dns.google，直连 8.8.8.8:443，不受本地 DNS 污染影响）解析出
+# Akamai 真实边缘 IP，再用「真实 IP 直连 + Host 头=域名」绕过。Akamai IP 动态变化，
+# 故必须运行时解析，不可硬编码。
+_DOH_URL = "https://8.8.8.8/resolve"
+_FALLBACK_IPS = ["2.17.106.21", "2.17.106.22", "23.32.91.196", "23.32.91.197"]
+_RESOLVED = {}   # 进程内缓存：domain -> 已验证可用的真实 IP
+
+
+def _domain_of(host: str) -> str:
+    return host.split("//", 1)[-1].split("/", 1)[0] or host
+
+
+def _doh_resolve(domain: str):
+    """用 DoH 解析真实 IPv4（绕过本地污染 DNS）。失败返回 []。"""
+    try:
+        r = requests.get(_DOH_URL, params={"name": domain, "type": "A"},
+                         timeout=12, verify=True, proxies={"http": None, "https": None})
+        j = r.json()
+        return [a["data"] for a in j.get("Answer", []) if a.get("type") == 1]
+    except Exception as e:
+        print(f"[miniMax] DoH 解析 {domain} 失败：{e}")
+        return []
+
+
+def _resolve_real_ips(host: str):
+    """返回真实 IP 候选列表：MINIMAX_REAL_IP 手动覆盖 > DoH 动态解析 > 内置兜底。"""
+    manual = clean_env_value(os.environ.get("MINIMAX_REAL_IP", ""))
+    if manual:
+        return [manual]
+    ips = _doh_resolve(_domain_of(host))
+    if ips:
+        return ips
+    return list(_FALLBACK_IPS)
+
+
+def _do_request(connect_base, token, params, path, method, body, timeout, host_header=None, verify=True):
+    """单次请求：计算签名 -> 发送 -> 返回 (status_code, json_or_raw)。"""
     signed_params, headers, body_str = _sign_request(path, token, params, method, body)
-    url = f"{host}{path}"
+    if host_header:
+        headers["Host"] = host_header
+    url = f"{connect_base}{path}"
     # 用 PreparedRequest 精确控制最终发出的 header，避免 requests 自动注入多余默认值
     req = requests.Request(method.upper(), url, params=signed_params,
-                           headers=headers, data=body_str or None)
+                            headers=headers, data=body_str or None)
     prepared = req.prepare()
+    if host_header:
+        prepared.headers["Host"] = host_header
     try:
         session = requests.Session()
         # proxies=None 强制直连，避免走代理导致被限频或连不上
-        r = session.send(prepared, timeout=timeout, proxies={"http": None, "https": None})
+        r = session.send(prepared, timeout=timeout, proxies={"http": None, "https": None}, verify=verify)
         try:
             return r.status_code, r.json()
         except Exception:
             return r.status_code, {"raw": r.text[:300]}
     except Exception as e:
         return 0, {"error": str(e)}
+
+
+def api_call(host, token, params, path, method="GET", body=None, timeout=30):
+    """带签名的请求，内置反 DNS 污染回退。
+
+    正常网络：域名直连（verify=True）。若连接层失败（sc==0，多为 DNS 污染/拦截网关/
+    TLS 证书不匹配被吞为错误），自动用 DoH 解析真实 Akamai IP 直连（verify=False + Host=域名）。
+    """
+    domain = _domain_of(host)
+    if domain in _RESOLVED and _RESOLVED[domain]:
+        # 本次进程已探明可用真实 IP，直接走它（不再依赖被污染的 DNS）
+        sc, sb = _do_request(f"https://{_RESOLVED[domain]}", token, params, path,
+                             method, body, timeout, domain, verify=False)
+        return sc, sb
+
+    sc, sb = _do_request(host, token, params, path, method, body, timeout, None, verify=True)
+    if sc != 0:
+        return sc, sb
+
+    # 连接层失败：疑似 DNS 污染，尝试 DoH 真实 IP 直连
+    err0 = (sb or {}).get("error") if isinstance(sb, dict) else str(sb)
+    print(f"[miniMax] 域名直连失败（疑似 DNS 污染到假 IP）：{err0}；尝试 DoH 解析真实 IP 绕过…")
+    last_err = err0
+    for ip in _resolve_real_ips(host):
+        sc, sb = _do_request(f"https://{ip}", token, params, path, method, body, timeout, domain, verify=False)
+        if sc != 0:
+            _RESOLVED[domain] = ip
+            print(f"[miniMax] 已通过真实 IP {ip} 绕过 DNS 污染")
+            return sc, sb
+        last_err = (sb or {}).get("error") if isinstance(sb, dict) else str(sb)
+    return 0, {"error": f"DNS 污染且 DoH/兜底 IP 均不可达：{last_err}"}
 
 
 def renew_token(token: str, params: dict):
