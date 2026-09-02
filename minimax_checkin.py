@@ -90,6 +90,10 @@ from datetime import datetime, timezone
 
 import requests
 
+# 内置零依赖 VLESS 代理（仅标准库，不依赖 xray/clash 等外部客户端）。
+# 提供 VlessProxy（订阅/单链接 -> 本地 HTTP 代理）与 fetch_subscription。
+from vless_proxy import VlessProxy, fetch_subscription
+
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -493,26 +497,72 @@ def is_rate_limited(http_status: int, data) -> bool:
 
 
 # ===== 经代理出网（绕过透明 TLS 拦截网关）=====
-# 当服务器出口被网关全阻断时，可经一个本地 HTTP 代理干净出网。
-# 代理由你自己的客户端（clash / xray 等，直接消费订阅地址）拉起，
-# 脚本只读取其本地地址，不绑定 / 不拉起任何代理核心：
-#   MINIMAX_PROXY : 已运行的本地代理 URL，如 http://127.0.0.1:10808
-# 订阅地址由你的客户端消费（脚本不抓取）：
-#   https://rom.msdmcp.top/sub?token=54fb6f9b95583ec8ad17bad7493a276f
-_PROXIES = None   # requests 代理 dict，start_proxy_from_env() 设置
+# 当服务器出口被网关全阻断时，经一个本地 HTTP 代理干净出网。
+# 代理优先级（高者优先）：
+#   1) MINIMAX_PROXY : 你自己起的外部代理地址（clash/xray 等），如 http://127.0.0.1:10808
+#   2) MINIMAX_SUB   : VLESS 订阅地址，脚本自动抓取并由内置零依赖代理拉起本地代理
+#   3) MINIMAX_VLESS : 单条 vless:// 链接，同样由内置零依赖代理拉起本地代理
+# 内置代理（vless_proxy.py）仅用标准库，不依赖任何外部客户端、不下载二进制，
+# 在签到前拉起、checkin_once 结束（finally）时自动关闭。
+# 订阅地址示例：https://rom.msdmcp.top/sub?token=54fb6f9b95583ec8ad17bad7493a276f
+_PROXIES = None        # requests 代理 dict，start_proxy_from_env() 设置
+_PROXY_INSTANCE = None  # 内置 VlessProxy 实例，stop_proxy() 时关闭
 
 
 def start_proxy_from_env():
-    """读 MINIMAX_PROXY 决定代理。返回是否启用。"""
-    global _PROXIES
+    """按优先级决定出网代理。返回是否启用。"""
+    global _PROXIES, _PROXY_INSTANCE
     if _PROXIES is not None:
         return True
+    # 1) 显式外部代理
     explicit = clean_env_value(os.environ.get("MINIMAX_PROXY", ""))
     if explicit:
         _PROXIES = {"http": explicit, "https": explicit}
         print(f"[miniMax] 使用显式代理：{explicit}")
         return True
+    # 2) 订阅地址：抓取后由内置零依赖代理拉起本地代理
+    sub = clean_env_value(os.environ.get("MINIMAX_SUB", ""))
+    if sub:
+        try:
+            links = fetch_subscription(sub)
+        except Exception as e:
+            print(f"[miniMax] 抓取订阅失败：{e}")
+            links = []
+        if links:
+            try:
+                inst = VlessProxy(links, local_port=10808, verify=True)
+                url = inst.start()
+                _PROXIES = {"http": url, "https": url}
+                _PROXY_INSTANCE = inst
+                print(f"[miniMax] 已用内置零依赖代理拉起本地代理：{url}（{len(links)} 节点）")
+                return True
+            except Exception as e:
+                print(f"[miniMax] 拉起内置代理失败：{e}")
+    # 3) 单条 vless 链接
+    vless = clean_env_value(os.environ.get("MINIMAX_VLESS", ""))
+    if vless:
+        try:
+            inst = VlessProxy([vless], local_port=10808, verify=True)
+            url = inst.start()
+            _PROXIES = {"http": url, "https": url}
+            _PROXY_INSTANCE = inst
+            print(f"[miniMax] 已用内置零依赖代理拉起本地代理：{url}")
+            return True
+        except Exception as e:
+            print(f"[miniMax] 拉起内置代理失败：{e}")
     return False
+
+
+def stop_proxy():
+    """关闭内置零依赖代理（若启用了），并清空代理状态以便下次重新拉起。"""
+    global _PROXIES, _PROXY_INSTANCE
+    if _PROXY_INSTANCE is not None:
+        try:
+            _PROXY_INSTANCE.stop()
+        except Exception:
+            pass
+        _PROXY_INSTANCE = None
+    _PROXIES = None
 
 
 def _do_request(connect_base, token, params, path, method, body, timeout, proxies=None):
@@ -639,27 +689,30 @@ def checkin_once(cred: dict):
         return "NO_CREDENTIAL", ("未获取到 MiniMax 登录态，请设置环境变量 MINIMAX_TOKEN / MINIMAX_USER_ID"
                                  "（或运行 python minimax_checkin.py --export-env --save 刷新）")
 
-    # 已配置出网代理(MINIMAX_PROXY)时，本次所有请求走本地代理；无需清理
+    # 已配置出网代理时，本次所有请求走本地代理；结束（finally）时自动关闭
     start_proxy_from_env()
-    last = ("NO_CREDENTIAL", "未获取到 MiniMax 登录态")
-    for token, source in candidates:
-        try:
-            flag, content = _try_checkin(user_id, token, source)
-        except Exception as e:                       # 单个候选异常不中断其余尝试
-            flag, content = "ERROR", f"⚠️ 执行异常（token 来源：{source}）：{type(e).__name__}: {e}"
-            print(f"[miniMax] {content}")
-        if flag in ("SUCCESS", "ALREADY_TODAY", "RATE_LIMITED"):
-            return flag, _with_tag(tag, content)
-        last = (flag, content)
-        print(f"[miniMax] token 来源 {source} 失败：RESULT={flag} | {content}")
+    try:
+        last = ("NO_CREDENTIAL", "未获取到 MiniMax 登录态")
+        for token, source in candidates:
+            try:
+                flag, content = _try_checkin(user_id, token, source)
+            except Exception as e:                       # 单个候选异常不中断其余尝试
+                flag, content = "ERROR", f"⚠️ 执行异常（token 来源：{source}）：{type(e).__name__}: {e}"
+                print(f"[miniMax] {content}")
+            if flag in ("SUCCESS", "ALREADY_TODAY", "RATE_LIMITED"):
+                return flag, _with_tag(tag, content)
+            last = (flag, content)
+            print(f"[miniMax] token 来源 {source} 失败：RESULT={flag} | {content}")
 
-    # 全部候选都失败：补一条可操作提示
-    flag, content = last
-    if flag == "AUTH_EXPIRED":
-        content += "｜处理：①本机 python minimax_checkin.py --export-env --save 重新导出；" \
-                   "②把新的 MINIMAX_TOKEN 填回青龙（注意别带引号）；" \
-                   "③若确认 token 无误仍 401，多为服务器出口 IP 被风控"
-    return flag, content
+        # 全部候选都失败：补一条可操作提示
+        flag, content = last
+        if flag == "AUTH_EXPIRED":
+            content += "｜处理：①本机 python minimax_checkin.py --export-env --save 重新导出；" \
+                       "②把新的 MINIMAX_TOKEN 填回青龙（注意别带引号）；" \
+                       "③若确认 token 无误仍 401，多为服务器出口 IP 被风控"
+        return flag, content
+    finally:
+        stop_proxy()
 
 
 _LEADING_ICONS = ("✅", "ℹ️", "⏳", "⚠️", "❌", "🎉")
