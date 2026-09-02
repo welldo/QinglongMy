@@ -99,10 +99,11 @@ export TRAE_MACHINE_ID=
 #   ① DNS 污染：被管控的服务器/网关会把 agent.minimax.io 解析到假 IP（如 198.20.0.x 拦截网关，
 #      表现「连不上 / 偶发 401」，与 token 是否过期无关）。脚本已内置【反 DNS 污染】：连接失败时
 #      自动用 DoH（dns.google，直连 8.8.8.8:443）解析真实 Akamai IP 直连（verify=False+Host=域名）。
-#   ② .env 不加载：脚本依赖 python-dotenv 加载 .env，但很多服务器/青龙环境没装该库，导致 .env
-#      完全不加载、MINIMAX_USER_ID 缺失，而 status/claim 接口【必须】传正确的 realUserID 否则直接 401
-#      （renewal 接口不校验 user_id，故表现为「续期成功但签到 401」）。脚本已内置【纯标准库 .env 解析兜底】，
-#      不依赖 python-dotenv；务必保证 MINIMAX_USER_ID = storage.json 里的 realUserID（不是 JWT 的 user.id）。
+#   ② .env 不加载：脚本依赖 python-dotenv 加载 .env，请确保运行环境已安装该依赖
+#      （已写入 requirements.txt，青龙 ql 环境请提前 pip install python-dotenv）。若 .env 未加载，
+#      MINIMAX_USER_ID 缺失会使 status/claim 接口【必须】传正确的 realUserID 否则直接 401
+#      （renewal 接口不校验 user_id，故表现为「续期成功但签到 401」）。
+#      务必保证 MINIMAX_USER_ID = storage.json 里的 realUserID（不是 JWT 的 user.id）。
 #   ③ 若 DoH 也不可达，可设 MINIMAX_REAL_IP=<真实IPv4> 强制指定（本机 nslookup agent.minimax.io 8.8.8.8 取得）。
 # token 失效/过期时：先去 MiniMax Agent 客户端重新登录（让其写回新 token），再在本机执行：
 #   python minimax_checkin.py --export-env --save  即可把最新 token/设备参数写回 .env

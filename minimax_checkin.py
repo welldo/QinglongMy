@@ -109,45 +109,9 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # 本地开发时自动加载同目录 .env；已设置的环境变量优先，不受影响。
-# 注意：不依赖 python-dotenv 第三方库（很多服务器/青龙环境没装，会导致 .env 完全不加载、
-#       进而 MINIMAX_USER_ID 缺失使 status 接口 401）。库可用时优先用库，否则用内置解析兜底。
-try:
-    from dotenv import load_dotenv
-    _HAS_DOTENV = True
-except ImportError:
-    _HAS_DOTENV = False
-
-
-def _load_env_file_simple():
-    """纯标准库解析同目录 .env（python-dotenv 不可用时的兜底）。
-    规则对齐 dotenv 默认：不覆盖已存在的系统环境变量；去首尾空白与成对引号。"""
-    p = os.path.join(BASE_DIR, ".env")
-    if not os.path.isfile(p):
-        return
-    try:
-        with open(p, "r", encoding="utf-8") as fh:
-            for raw in fh:
-                line = raw.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                k, v = k.strip(), v.strip()
-                if not k:
-                    continue
-                if k in os.environ:        # 已设置的环境变量优先，不被 .env 覆盖
-                    continue
-                v = v.strip('"').strip("'")
-                os.environ[k] = v
-    except Exception as e:
-        print(f"[warn] 解析 .env 失败: {e}")
-
-
-if _HAS_DOTENV:
-    load_dotenv(os.path.join(BASE_DIR, ".env"))
-else:
-    _load_env_file_simple()
+# python-dotenv 为本项目依赖（见 requirements.txt），统一用官方库加载，不做自定义兜底。
+from dotenv import load_dotenv
+load_dotenv()
 
 # 通知模块（同目录 sendNotify.py）；缺失则降级为仅打印
 try:
