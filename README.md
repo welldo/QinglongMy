@@ -97,14 +97,17 @@ export TRAE_MACHINE_ID=
 #
 # ⚠️「服务器上跑总失败（401）」的真正根因（已内置修复，了解即可）：
 #   ① DNS 污染：被管控的服务器/网关会把 agent.minimax.io 解析到假 IP（如 198.20.0.x 拦截网关，
-#      表现「连不上 / 偶发 401」，与 token 是否过期无关）。脚本已内置【反 DNS 污染】：连接失败时
-#      自动用 DoH（dns.google，直连 8.8.8.8:443）解析真实 Akamai IP 直连（verify=False+Host=域名）。
-#   ② .env 不加载：脚本依赖 python-dotenv 加载 .env，请确保运行环境已安装该依赖
-#      （已写入 requirements.txt，青龙 ql 环境请提前 pip install python-dotenv）。若 .env 未加载，
-#      MINIMAX_USER_ID 缺失会使 status/claim 接口【必须】传正确的 realUserID 否则直接 401
-#      （renewal 接口不校验 user_id，故表现为「续期成功但签到 401」）。
-#      务必保证 MINIMAX_USER_ID = storage.json 里的 realUserID（不是 JWT 的 user.id）。
-#   ③ 若 DoH 也不可达，可设 MINIMAX_REAL_IP=<真实IPv4> 强制指定（本机 nslookup agent.minimax.io 8.8.8.8 取得）。
+#      表现「连不上 / 偶发 401」，与 token 是否过期无关）。脚本已内置【反 DNS 污染】：域名直连失败
+#      （含伪 401）时，自动【原始 UDP/53 直连公共解析器】（223.5.5.5 等，绕过本地污染递归）+ HTTPS DoH
+#      （阿里 AliDNS / Google）解析真实 Akamai IP 直连（verify=False+Host=域名），并跳过污染网段与死边缘。
+#      注意：很多服务器会屏蔽 8.8.8.8:443，故【优先 UDP/53】而非只依赖 Google DoH。
+#   ② 环境变量：服务器用 `export` 直接传参即可（如 WB_ACCESS_TOKEN=…），无需 dotenv；load_dotenv()
+#      默认不覆盖已存在的环境变量，故即使未装 python-dotenv 也能读到 export 的变量（WB 即如此跑通）。
+#      仅当本地依赖 .env 文件时才需 python-dotenv。无论哪种方式，务必保证
+#      MINIMAX_USER_ID = storage.json 里的 realUserID（不是 JWT 的 user.id），否则 status/claim 直 401
+#      （renewal 不校验 user_id，故表现为「续期成功但签到 401」）。
+#   ③ 若 UDP/53 与 DoH 均不可达，可设 MINIMAX_REAL_IP=<真实IPv4> 强制指定（本机
+#      `nslookup agent.minimax.io 223.5.5.5` 取得最新边缘 IP）。
 # token 失效/过期时：先去 MiniMax Agent 客户端重新登录（让其写回新 token），再在本机执行：
 #   python minimax_checkin.py --export-env --save  即可把最新 token/设备参数写回 .env
 # 只想续期现有 token（token 尚有效即可，任意机器）：

@@ -507,41 +507,139 @@ def is_rate_limited(http_status: int, data) -> bool:
     return any(k in msg for k in RATE_LIMIT_KEYWORDS)
 
 
-# ===== 反 DNS 污染：连接失败时改用 DoH 动态解析真实 IP 直连 =====
+# ===== 反 DNS 污染：连接失败时改用真实 IP 直连 =====
 # 某些网络（被管控的服务器/网关）会把 agent.minimax.io 解析到假 IP（如 198.20.0.x 拦截网关），
-# 导致连接失败。此时用 DoH（dns.google，直连 8.8.8.8:443，不受本地 DNS 污染影响）解析出
-# Akamai 真实边缘 IP，再用「真实 IP 直连 + Host 头=域名」绕过。Akamai IP 动态变化，
-# 故必须运行时解析，不可硬编码。
-_DOH_URL = "https://8.8.8.8/resolve"
-_FALLBACK_IPS = ["2.17.106.21", "2.17.106.22", "23.32.91.196", "23.32.91.197"]
+# 导致连接失败或伪 401。此时运行时解析出 Akamai 真实边缘 IP，再用「真实 IP 直连 +
+# Host 头=域名 + verify=False」绕过。Akamai IP 动态变化，故必须运行时解析，不可硬编码。
+# 解析优先走「原始 UDP/53 直连公共解析器」（绕过本地被污染的递归解析器，且多数网络
+# 即便封锁 8.8.8.8:443 也放行 UDP/53）；UDP 不可达时再用 HTTPS DoH 兜底。
+import socket as _sock
+import struct as _struct
+import base64 as _b64
+
 _RESOLVED = {}   # 进程内缓存：domain -> 已验证可用的真实 IP
+_POISON_PREFIX = "198.20.0."   # 已知拦截网关网段，解析到此处视为污染，直接跳过
 
 
 def _domain_of(host: str) -> str:
     return host.split("//", 1)[-1].split("/", 1)[0] or host
 
 
-def _doh_resolve(domain: str):
-    """用 DoH 解析真实 IPv4（绕过本地污染 DNS）。失败返回 []。"""
-    try:
-        r = requests.get(_DOH_URL, params={"name": domain, "type": "A"},
-                         timeout=12, verify=True, proxies={"http": None, "https": None})
-        j = r.json()
-        return [a["data"] for a in j.get("Answer", []) if a.get("type") == 1]
-    except Exception as e:
-        print(f"[miniMax] DoH 解析 {domain} 失败：{e}")
+def _dns_query_wire(domain: str) -> bytes:
+    """构造一条 A 记录查询报文（DNS 线格式），供 UDP 直连与 HTTPS DoH 复用。"""
+    txid = b"\x13\x57"
+    header = txid + _struct.pack(">H", 0x0100) + _struct.pack(">H", 1) + b"\x00\x00\x00\x00\x00\x00"
+    q = b""
+    for label in domain.split("."):
+        q += bytes([len(label)]) + label.encode("ascii")
+    q += b"\x00" + _struct.pack(">H", 1) + _struct.pack(">H", 1)   # QTYPE=A, QCLASS=IN
+    return header + q
+
+
+def _parse_a_records(data: bytes):
+    """从 DNS 响应里抽出所有 A 记录 IPv4（兼容响应中的名称压缩指针）。"""
+    if len(data) < 12:
         return []
+    n = _struct.unpack(">H", data[6:8])[0]
+    i = 12
+    while i < len(data) and data[i] != 0 and not (data[i] & 0xC0):
+        i += 1
+    if i >= len(data):
+        return []
+    i += 1 + 4   # 结尾 0 + QTYPE(2) + QCLASS(2)
+    ips = []
+    for _ in range(n):
+        if i >= len(data):
+            break
+        if data[i] & 0xC0:
+            i += 2
+        else:
+            while i < len(data) and data[i] != 0:
+                i += 1
+            i += 1
+        if i + 10 > len(data):
+            break
+        typ, _cls, _ttl, rdlen = _struct.unpack(">HHIH", data[i:i + 10])
+        i += 10
+        if typ == 1 and rdlen == 4 and i + 4 <= len(data):
+            ips.append(".".join(str(b) for b in data[i:i + 4]))
+        i += rdlen
+    return ips
+
+
+_UDP_RESOLVERS = ["223.5.5.5", "119.29.29.29", "8.8.8.8", "1.1.1.1"]
+
+
+def _udp_resolve(domain: str):
+    """原始 UDP/53 直连公共解析器，绕过本地被污染的递归解析器。失败返回 []。"""
+    pkt = _dns_query_wire(domain)
+    for r in _UDP_RESOLVERS:
+        try:
+            s = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
+            s.settimeout(5)
+            s.sendto(pkt, (r, 53))
+            data, _ = s.recvfrom(4096)
+            s.close()
+            ips = _parse_a_records(data)
+            if ips:
+                return ips
+        except Exception:
+            try:
+                s.close()
+            except Exception:
+                pass
+    return []
+
+
+_DOH_PROVIDERS = [
+    ("https://223.5.5.5/dns-query", True),    # 阿里 AliDNS DoH（线格式 dns=）
+    ("https://8.8.8.8/resolve", False),        # Google DoH（name/type 格式）
+]
+
+
+def _doh_resolve(domain: str):
+    """HTTPS DoH 兜底（用于 UDP/53 被封锁的环境）。失败返回 []。"""
+    wire = _b64.urlsafe_b64encode(_dns_query_wire(domain)).rstrip(b"=").decode()
+    last_err = ""
+    for url, wire_fmt in _DOH_PROVIDERS:
+        try:
+            if wire_fmt:
+                params, headers = {"dns": wire}, {"Accept": "application/dns-message"}
+            else:
+                params, headers = {"name": domain, "type": "A"}, {"Accept": "application/dns-json"}
+            r = requests.get(url, params=params, headers=headers,
+                             timeout=10, verify=False, proxies={"http": None, "https": None})
+            ips = []
+            try:
+                j = r.json()   # Google 等返回 JSON
+                ips = [a["data"] for a in j.get("Answer", []) if a.get("type") == 1]
+            except Exception:
+                # AliDNS 等返回二进制 application/dns-message，按线格式解析
+                ips = _parse_a_records(r.content)
+            if ips:
+                return ips
+        except Exception as e:
+            last_err = f"{url}: {e}"
+    if last_err:
+        print(f"[miniMax] DoH 兜底解析 {domain} 失败：{last_err}")
+    return []
 
 
 def _resolve_real_ips(host: str):
-    """返回真实 IP 候选列表：MINIMAX_REAL_IP 手动覆盖 > DoH 动态解析 > 内置兜底。"""
+    """返回真实 IP 候选列表：MINIMAX_REAL_IP 手动覆盖 > UDP/53 > HTTPS DoH。"""
     manual = clean_env_value(os.environ.get("MINIMAX_REAL_IP", ""))
     if manual:
         return [manual]
-    ips = _doh_resolve(_domain_of(host))
+    domain = _domain_of(host)
+    ips = _udp_resolve(domain)
     if ips:
+        print(f"[miniMax] UDP/53 解析 {domain} -> {ips}")
         return ips
-    return list(_FALLBACK_IPS)
+    ips = _doh_resolve(domain)
+    if ips:
+        print(f"[miniMax] DoH 解析 {domain} -> {ips}")
+        return ips
+    return []
 
 
 def _do_request(connect_base, token, params, path, method, body, timeout, host_header=None, verify=True):
@@ -593,13 +691,25 @@ def api_call(host, token, params, path, method="GET", body=None, timeout=30):
     print(f"[miniMax] 域名直连{reason}：{err0}；尝试 DoH 解析真实 IP 绕过…")
     last_err = err0
     for ip in _resolve_real_ips(host):
+        if ip.startswith(_POISON_PREFIX):   # 解析结果仍是拦截网关，跳过
+            print(f"[miniMax] 跳过疑似污染 IP {ip}（{reason}）")
+            continue
         sc, sb = _do_request(f"https://{ip}", token, params, path, method, body, timeout, domain, verify=False)
+        # 个别 Akamai 边缘未映射该 vhost（返回 nginx 404），换下一个真实 IP 重试
+        if sc == 404 and isinstance(sb, dict) and "nginx" in str(sb.get("raw", "")):
+            print(f"[miniMax] 真实 IP {ip} 返回 nginx 404（非预期 vhost），尝试下一个…")
+            continue
+        # 真实 IP 仍被拦截网关伪响应（401）：继续尝试其他候选，不提前返回
+        if sc == 401:
+            print(f"[miniMax] 真实 IP {ip} 仍返回 401（疑似仍被拦截），尝试下一个…")
+            last_err = "真实 IP 仍被拦截（401）"
+            continue
         if sc != 0:
             _RESOLVED[domain] = ip
             print(f"[miniMax] 已通过真实 IP {ip} 绕过（{reason}）")
             return sc, sb
         last_err = (sb or {}).get("error") if isinstance(sb, dict) else str(sb)
-    return 0, {"error": f"DNS 污染且 DoH/兜底 IP 均不可达：{last_err}"}
+    return 0, {"error": f"DNS 污染且 UDP/DoH 真实 IP 均不可达：{last_err}"}
 
 
 def renew_token(token: str, params: dict):
