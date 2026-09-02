@@ -18,7 +18,7 @@
 * [xb](xb.py) 全网羊毛线报精选，使用 gemini-3-flash-preview 模型进行内容分析
 * [douban_spider](douban_spider.py) 豆瓣小组（上海租房版demo）
 * [workbuddy_checkin](workbuddy_checkin.py) WorkBuddy 每日积分自动签到（100积分/天，连续第7天1000积分），**默认只读环境变量**，`--export-env`（或 `--export-env --save` 写回 .env）可读取本机登录态刷新 token，幂等可重复运行
-* [trae_checkin](trae_checkin.py) Trae Work 每日积分自动签到，**默认只读环境变量**（不再自动读本机），`--export-env` 读取本机登录态解密导出，`--export-env --save` 可写回 .env 刷新
+* [trae_checkin](trae_checkin.py) Trae Work 每日积分自动签到，**默认只读环境变量**（不再自动读本机）；**内置自动续期/自愈**：access token 仅约 14 天有效，脚本用 `refreshToken` + 设备 ECDSA 私钥（`--export-keys` 引导，纯标准库签名、无需第三方库）向 `ExchangeToken` 换发新 token，在「无 token / 即将过期(<48h) / 鉴权失败」时自动续期并重试，续期结果写回 `.trae_token.json` 缓存（青龙环境靠它自愈）；`--export-keys`（同 `--export-env`）/ `--renew` 配合 `--save` 可写回 .env 刷新
 * [minimax_checkin](minimax_checkin.py) MiniMax Code 每日积分自动签到（400积分/天，第4、7天1000积分），**默认只读环境变量**（不再自动读本机），逆向 `yy`/`x-signature` 签名；**每次运行先调 `/v1/api/user/renewal` 续期（相当于先登录）再签到**，新 token 自动写回 `.minimax_token.json` 缓存（青龙环境靠它自愈，token 永不失效）；环境变量会自动去除首尾空白与误粘的引号（青龙 401 头号元凶）；`--export-env`（先续期再导出）/`--renew`（仅续期）配合 `--save` 可写回 .env 刷新
 * [checkin_all](checkin_all.py) 聚合签到（推荐）：**只需设一个定时**，依次跑 WorkBuddy / Trae Work / MiniMax Code 三个签到，合并结果后**只发一次推送**。各子脚本的单独定时可停用/删除。另支持 `python checkin_all.py --export-env --save` **一条命令批量刷新三个 token**（等价逐个执行各子脚本的 `--export-env --save`），要求本机三个桌面端均已登录
 
@@ -76,14 +76,18 @@ export WB_USER_ID=
 
 ## Trae Work 每日签到（trae_checkin.py）
 # 脚本【默认只读取以下环境变量】，不自动解密本机登录态
-# token 过期时，在本机（已登录 Trae 桌面端）执行：python trae_checkin.py --export-env --save 即可刷新
+# 【自动续期/自愈】token 约 14 天有效；用 refreshToken + 设备 ECDSA 私钥自动续期（无需桌面端在服务器上运行）
+# 引导：本机已登录 Trae 桌面端执行 python trae_checkin.py --export-keys --save 写回下列全部变量（含设备私钥）
 #   - 设备 id 取 storage.json 中 iCubeAuthInfo://icube-dc:<numeric> 键的数字部分；服务端按注册指纹校验 device id，
 #     UUID 格式的 telemetry.devDeviceId 不被识别为注册设备，会触发更严格限流（sign 接口 code 9074）
-#   - 切勿把设备 id 填成 UUID；--export-env 导出的已是正确数字值
+#   - 切勿把设备 id 填成 UUID；--export-keys 导出的已是正确数字值
 export TRAE_TOKEN=
 export TRAE_DEVICE_ID=
-# 可选：仅用于展示
 export TRAE_USER_ID=
+export TRAE_REFRESH_TOKEN=
+export TRAE_DEVICE_KEY_PEM=
+export TRAE_DEVICE_PUB_PEM=
+export TRAE_MACHINE_ID=
 
 ## MiniMax Code 每日签到（minimax_checkin.py）
 # 脚本【默认只读取以下环境变量】，不自动读取本机登录态
