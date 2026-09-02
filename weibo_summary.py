@@ -6,16 +6,11 @@ new Env('微博热搜');
 """
 from collections import Counter
 from urllib.parse import quote
-import os
-from dotenv import load_dotenv
 import requests
 import sendNotify
 import jieba.analyse
 import sqlite3
 from datetime import datetime
-from bs4 import BeautifulSoup
-
-load_dotenv()  # 让 WEIBO_COOKIE 等环境变量从 .env 读取（不会覆盖已有 os.environ）
 
 summary_list = []
 conn = sqlite3.connect('wb.db')
@@ -196,67 +191,53 @@ FLAG_ICONS = {
     "爆": "https://simg.s.weibo.com/moter/flags/4_0.png",
 }
 
+# 角标图片 URL -> 热搜 flag，用于从 newsnow 接口返回的 icon 反推 新/热/爆
+ICON_TO_FLAG = {url: flag for flag, url in FLAG_ICONS.items()}
+
 
 def get_hot_search():
-    """参照 newsnow 的微博源：直接抓取 s.weibo.com 热搜榜 HTML。
-    旧的 m.weibo.cn JSON 接口（containerid=realtimehot）已不稳定/需登录，故改用 HTML 解析。
+    """参照 newsnow 的微博源：直接调用其线上聚合接口获取热搜列表。
+    不再抓取 s.weibo.com 页面，也无需本地 Cookie。
+    接口: GET https://newsnow.busiyi.world/api/s?id=weibo
     """
-    baseurl = "https://s.weibo.com"
-    url = f"{baseurl}/top/summary?cate=realtimehot"
+    url = "https://newsnow.busiyi.world/api/s"
+    params = {"id": "weibo"}
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-        "referer": url,
-        # 热搜页需要登录态。可把带 SUB 的 Cookie 配到环境变量 WEIBO_COOKIE；
-        # 留空时回退到 newsnow 的公开 Cookie（可能随时失效，建议自备）。
-        "Cookie": os.getenv(
-            "WEIBO_COOKIE",
-            "_2AkMWIuNSf8NxqwJRmP8dy2rhaoV2ygrEieKgfhKJJRMxHRl-yT9jqk86tRB6PaLNvQZR6zYUcYVT1zSjoSreQHidcUq7",
-        ),
     }
 
     try:
-        resp = requests.get(url, headers=headers, timeout=15)
-        resp.encoding = "utf-8"
+        resp = requests.get(url, params=params, headers=headers, timeout=15)
         resp.raise_for_status()
+        data = resp.json()
     except requests.exceptions.RequestException as e:
-        print(f"请求热搜页失败: {e}")
+        print(f"请求 newsnow 微博接口失败: {e}")
+        return []
+    except ValueError as e:
+        print(f"解析 newsnow 微博接口 JSON 失败: {e}")
         return []
 
-    soup = BeautifulSoup(resp.text, "html.parser")
-    rows = soup.select("#pl_top_realtimehot table tbody tr")[1:]  # 第一行是表头，跳过
-
-    if not rows:
-        if "Sina Visitor System" in resp.text or "visitor" in resp.text.lower():
-            print("⚠️ 返回的是微博访客验证页：缺少有效 Cookie。"
-                  "请设置环境变量 WEIBO_COOKIE（值为带 SUB= 的登录态，从浏览器 F12 复制），否则热搜页无法读取。")
-        else:
-            print("⚠️ 未解析到热搜列表，页面结构可能已变化。")
+    items = data.get("items", []) if isinstance(data, dict) else []
+    if not items:
+        print(f"⚠️ newsnow 微博接口未返回热搜数据: {data}")
         return []
 
-    for row in rows:
-        link = row.select_one("td.td-02 a")
-        if not link:
-            continue
-        href = link.get("href", "") or ""
-        if not href or "javascript:void(0)" in href:
-            continue
-        title = link.get_text(strip=True)
+    for raw in items:
+        title = (raw.get("title") or "").strip()
         if not title:
             continue
-
-        flag_tag = row.select_one("td.td-03")
-        flag = flag_tag.get_text(strip=True) if flag_tag else ""
-        icon_url = FLAG_ICONS.get(flag)
-        state = flag  # 新/热/爆，参与去重与展示
+        extra = raw.get("extra") or {}
+        icon_url = (extra.get("icon") or {}).get("url") if isinstance(extra, dict) else None
+        state = ICON_TO_FLAG.get(icon_url, "")  # 新/热/爆，参与去重与展示
 
         item = {
             'id': title,
             'title': title,
             'state': state,
             'extra': {'icon': {'url': icon_url, 'scale': 1.5} if icon_url else None},
-            'url': f"{baseurl}{href}",
-            'mobileUrl': f"{baseurl}{href}",
+            'url': raw.get("url") or "",
+            'mobileUrl': raw.get("mobileUrl") or "",
         }
         filter_item(item)
 
