@@ -31,7 +31,7 @@
 ## 添加仓库
 
    ```shell
-   ql repo https://github.com/mgmg22/QinglongMy.git "summary|stock_spider|trade|epic_free_game|xb|send_qq|job|checkin" "activity|backUp" "sendNotify|stopwords|util" "main"
+   ql repo https://github.com/mgmg22/QinglongMy.git "summary|stock_spider|trade|epic_free_game|xb|send_qq|job|checkin|proxy" "activity|backUp" "sendNotify|stopwords|util" "main"
    ```
 
 ## 推送渠道及在线测试
