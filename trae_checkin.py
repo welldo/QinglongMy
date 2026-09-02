@@ -1,8 +1,8 @@
 #!/bin/env python3
 # -*- coding: utf-8 -*
 """
-# cron: 23 0 * * * trae_checkin.py
-# new Env('TraeWork每日积分签到');
+cron: 23 0 * * * trae_checkin.py
+new Env('TraeWork每日积分签到');
 
 ==================== Trae Work 自动签到 ====================
 
@@ -69,14 +69,15 @@ import platform
 from datetime import datetime, timezone
 
 import requests
-
-# 本地开发时自动加载同目录 .env；已设置的环境变量优先，不受影响。
-# python-dotenv 为本项目依赖（见 requirements.txt），统一用官方库加载，不做自定义兜底。
 from dotenv import load_dotenv
 load_dotenv()
 
 try:
     from Crypto.Cipher import AES
+    from Crypto.Util.Padding import pad, unpad
+    from Crypto.PublicKey import ECC
+    from Crypto.Signature import DSS
+    from Crypto.Hash import SHA256
 except ImportError:
     print("缺少依赖 pycryptodome，请执行: pip install pycryptodome")
     sys.exit(1)
@@ -90,8 +91,7 @@ except Exception:
 
 
 def _save_env_values(values: dict):
-    """把导出的环境变量写回同目录 .env（仅更新/追加给定 key，保留其它内容）。
-    仅 --export-env --save 时调用。返回写入的变量数（0 表示失败）。"""
+    """把导出的环境变量写回同目录 .env（仅更新/追加给定 key，保留其它内容）。"""
     env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
     lines = []
     if os.path.isfile(env_path):
@@ -120,7 +120,7 @@ def _save_env_values(values: dict):
         print(f"[warn] 写入 .env 失败: {e}")
         return 0
 
-# ===== 加密信封常量（源自 TRAE 客户端 ）=====
+# ===== 加密信封常量 =====
 HEADER = bytes([116, 99, 5, 16, 0, 0])
 LEFT_SECRET = bytes([
     82, 9, 106, 213, 48, 54, 165, 56, 191, 64, 163, 158, 129, 243, 215, 251,
@@ -142,25 +142,19 @@ HOST = "https://api.trae.cn"
 STORAGE_REL = os.path.join("User", "globalStorage", "storage.json")
 AUTH_KEY = "iCubeAuthInfo://icube.cloudide"
 
-# ===== 自动续期（ExchangeToken）相关常量 =====
-# 续期端点与签到同域；用 refreshToken + 设备 ECDSA 私钥证明换取新 token。
+# ===== 自动续期相关常量 =====
 EXCHANGE_PATH = "/trae/api/v3/oauth/ExchangeToken"
 CLIENT_ID = "en1oxy7wnw8j9n"
-# IDE/Client 版本：逆向仓库实测用 1.107.1 即放行；可用 TRAE_APP_VERSION 覆盖。
 APP_VERSION = os.environ.get("TRAE_APP_VERSION", "1.107.1")
-# 续期后把最新凭据写回同目录缓存（已加入 .gitignore）；青龙工作目录可写，靠它滚动续期，
-# 只要脚本能跑起来就不会再因 token 过期而失败。
 CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".trae_token.json")
-# 设备证明指纹：OSInfo 必须为 'Windows' 且硬件串留空，否则服务端报 20405（设备证明缺失）。
 DEVICE_OS_INFO = "Windows"
 
-
+# ===== 辅助函数 =====
 def _sha512(data: bytes) -> bytes:
     return hashlib.sha512(data).digest()
 
-
+# ---- AES 加解密（使用 pad/unpad） ----
 def decrypt_trae_auth_info(encoded: str) -> dict:
-    """解密 TRAE 桌面端 base64 登录信封，返回 auth_info JSON 字典。"""
     envelope = base64.b64decode(encoded)
     if len(envelope) <= 38 or envelope[:6] != HEADER:
         raise ValueError("Invalid TRAE desktop credential envelope")
@@ -171,10 +165,7 @@ def decrypt_trae_auth_info(encoded: str) -> dict:
     key, iv = derived[:16], derived[16:32]
 
     cipher = AES.new(key, AES.MODE_CBC, iv)
-    plaintext = cipher.decrypt(envelope[38:])
-    pad = plaintext[-1]
-    if 1 <= pad <= 16:
-        plaintext = plaintext[:-pad]
+    plaintext = unpad(cipher.decrypt(envelope[38:]), 16)
 
     if len(plaintext) < 64:
         raise ValueError("decrypted payload too short")
@@ -183,10 +174,7 @@ def decrypt_trae_auth_info(encoded: str) -> dict:
         raise ValueError("TRAE desktop credential integrity check failed")
     return json.loads(payload.decode("utf-8"))
 
-
 def encrypt_trae_auth_info(plaintext: str) -> str:
-    """把 auth_info JSON 加密回 byteCrypto 信封（与 decrypt_trae_auth_info 对称）。
-    用于把续期后得到的新 token/refreshToken 写回本机 storage.json，保持桌面端一致。"""
     import os as _os
     random_key = _os.urandom(32)
     secret = bytes(a ^ b for a, b in zip(LEFT_SECRET, RIGHT_SECRET))
@@ -194,143 +182,88 @@ def encrypt_trae_auth_info(plaintext: str) -> str:
     key, iv = derived[:16], derived[16:32]
 
     body = plaintext.encode("utf-8")
-    payload = _sha512(body) + body                     # 64B 摘要 || 明文
-    pad_len = 16 - (len(payload) % 16)                 # PKCS7
-    payload += bytes([pad_len]) * pad_len
+    payload = _sha512(body) + body
+    payload = pad(payload, 16)
     cipher = AES.new(key, AES.MODE_CBC, iv).encrypt(payload)
 
     envelope = HEADER + random_key + cipher
     return base64.b64encode(envelope).decode("utf-8")
 
-
-# ===== 纯标准库 ECDSA P-256 设备证明（无第三方依赖，便于 qinglong 服务器运行）=====
-# 服务端校验 ExchangeToken 的设备证明需要 ECDSA P-256 / SHA-256 签名（DER 编码 + 低 s 归一化），
-# 与 Electron 客户端 node:crypto 的 createSign('sha256') 行为一致。
-_P = 0xffffffff00000001000000000000000000000000ffffffffffffffffffffffff
-_A = (_P - 3) % _P
-_B = 0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b
-_GX = 0x6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296
-_GY = 0x4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5
+# ---- ECDSA 签名（使用 pycryptodome） ----
+# P-256 曲线阶 N（用于低 s 归一化）
 _N = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551
 
-
-def _ec_inv(x, m):
-    return pow(x % m, -1, m)
-
-
-def _ec_add(p, q):
-    if p is None:
-        return q
-    if q is None:
-        return p
-    x1, y1 = p
-    x2, y2 = q
-    if x1 == x2 and (y1 + y2) % _P == 0:
-        return None
-    if x1 == x2 and y1 == y2:
-        m = (3 * x1 * x1 + _A) * _ec_inv(2 * y1, _P) % _P
-    else:
-        m = (y2 - y1) * _ec_inv((x2 - x1) % _P, _P) % _P
-    x3 = (m * m - x1 - x2) % _P
-    y3 = (m * (x1 - x3) - y1) % _P
-    return (x3, y3)
-
-
-def _ec_mul(k, p):
-    r = None
-    while k:
-        if k & 1:
-            r = _ec_add(r, p)
-        p = _ec_add(p, p)
-        k >>= 1
-    return r
-
-
-def _der_encode_signature(r, s):
+def _der_encode_signature(r: int, s: int) -> bytes:
+    """将 r, s 编码为 ASN.1 DER 签名（长度固定为 0x44）。"""
     def _enc(x):
-        b = x.to_bytes((x.bit_length() + 7) // 8 or 1, "big")
+        b = x.to_bytes(32, "big")  # 固定 32 字节，前面补零
+        # 若最高位为 1，需加 0x00 前缀（但我们的 r/s 可能小于 N，最高位大概率0，但保留安全）
         if b[0] & 0x80:
             b = b"\x00" + b
         return b
     rb, sb = _enc(r), _enc(s)
+    # 总长度 0x44 = 2 + (2+32) + (2+32) = 70 字节，但若加了前缀会更长，为简单处理我们用动态长度
+    # 正常情况 rb/sb 长度 32，若加了前缀则为33，需调整总长度
+    # 此处用动态长度更通用
     body = b"\x02" + bytes([len(rb)]) + rb + b"\x02" + bytes([len(sb)]) + sb
     return b"\x30" + bytes([len(body)]) + body
 
+def ecdsa_sign_pure(private_pem: str, data: bytes) -> str:
+    """用设备 EC 私钥对数据做 ECDSA P-256/SHA-256 签名，返回 base64(DER)。"""
+    key = ECC.import_key(private_pem)
+    signer = DSS.new(key, 'fips-186-3')
+    sig = signer.sign(SHA256.new(data))  # DER 编码
 
-def _extract_private_d(private_pem: str) -> int:
-    """从 P-256 PKCS#8 私钥 PEM 中提取私钥整数 d（仅依赖标准库）。
+    # 解析 DER 提取 r 和 s（格式：0x30 0x44 0x02 len r 0x02 len s）
+    # 简单解析：跳过 0x30 和 len，然后 0x02 len_r r 0x02 len_s s
+    der = sig
+    if der[0] != 0x30:
+        raise ValueError("Invalid DER signature")
+    idx = 2  # 跳过 0x30 和 length
+    if der[1] & 0x80:  # 长格式，但我们的长度固定 <128，所以直接跳过
+        idx += 1
+    if der[idx] != 0x02:
+        raise ValueError("Missing r integer")
+    len_r = der[idx+1]
+    r_bytes = der[idx+2:idx+2+len_r]
+    idx += 2 + len_r
+    if der[idx] != 0x02:
+        raise ValueError("Missing s integer")
+    len_s = der[idx+1]
+    s_bytes = der[idx+2:idx+2+len_s]
+    r = int.from_bytes(r_bytes, "big")
+    s = int.from_bytes(s_bytes, "big")
 
-    兼容带/不带 -----BEGIN/END----- 标记、带或不带换行的各种存储形式
-    （qinglong 等面板粘贴多行 PEM 时可能丢失标记或换行，只剩 base64 主体）。"""
-    import re as _re
-    s = (private_pem or "").strip()
-    s = _re.sub(r"-----[A-Z0-9 ]+-----", "", s)   # 去掉 PEM 头尾标记
-    s = _re.sub(r"\s+", "", s)                    # 去掉所有空白（含换行/回车/空格）
-    if not s:
-        raise ValueError("设备私钥 PEM 为空或缺少主体（请重新运行 python trae_checkin.py --export-keys --save 引导）")
-    try:
-        der = base64.b64decode(s)
-    except Exception as e:
-        raise ValueError(f"设备私钥 base64 解析失败（PEM 可能被截断/格式错误）: {e}")
-    i = der.find(b"\x02\x01\x01")          # 内层 SEQUENCE 的 version INTEGER = 1
-    if i < 0:
-        raise ValueError("无法定位 EC 私钥结构（PEM 可能不完整，请重新引导）")
-    j = der.find(b"\x04\x20", i)          # 紧跟其后的 32 字节 OCTET STRING 即私钥 d
-    if j < 0:
-        raise ValueError("无法定位私钥 d 的 OCTET STRING（PEM 可能不完整，请重新引导）")
-    return int.from_bytes(der[j + 2:j + 2 + 32], "big")
+    # 低 s 归一化
+    if s > _N // 2:
+        s = _N - s
 
+    # 重新 DER 编码
+    der_new = _der_encode_signature(r, s)
+    return base64.b64encode(der_new).decode("utf-8")
 
-def _normalize_pem(raw: str) -> str:
-    """把 env 里的 PEM 统一成标准 PEM 文本。支持两种输入：
-    - 标准多行 PEM（含 -----BEGIN-----）；
-    - 单行 base64（把整段 PEM 做了 base64 后去换行）——用于 qinglong config.sh 等
-      不支持多行值的 shell 环境，避免多行未加引号导致 shell 把换行当成多条命令执行。
-    返回标准 PEM 文本（含换行），后续 _extract_private_d 等可正常解析。"""
+def _normalize_pem(raw: str, key_type="PRIVATE") -> str:
+    """把 env 里的 PEM 统一成标准 PEM 文本。支持标准多行或纯 Base64 主体。"""
     s = (raw or "").strip()
     if not s:
         return ""
     if "-----BEGIN" in s:
         return s
-    try:
-        return base64.b64decode(s).decode("utf-8", "replace")
-    except Exception:
-        return s
+    # 若只是纯 Base64 主体（无换行），补全头尾
+    if key_type.upper() == "PRIVATE":
+        return f"-----BEGIN PRIVATE KEY-----\n{s}\n-----END PRIVATE KEY-----"
+    else:
+        return f"-----BEGIN PUBLIC KEY-----\n{s}\n-----END PUBLIC KEY-----"
 
-
-def ecdsa_sign_pure(private_pem: str, data: bytes) -> str:
-    """用设备 EC 私钥对数据做 ECDSA P-256/SHA-256 签名，返回 base64(DER)。"""
-    d = _extract_private_d(private_pem)
-    z = int.from_bytes(hashlib.sha256(data).digest(), "big")
-    if z.bit_length() > 256:
-        z >>= (z.bit_length() - 256)
-    while True:
-        k = int.from_bytes(os.urandom(32), "big") % _N
-        if k == 0:
-            continue
-        R = _ec_mul(k, (_GX, _GY))
-        r = R[0] % _N
-        if r == 0:
-            continue
-        s = (_ec_inv(k, _N) * (z + r * d)) % _N
-        if s == 0:
-            continue
-        if s > _N // 2:                     # 低 s 归一化（与 node/cryptography 默认一致）
-            s = _N - s
-        return base64.b64encode(_der_encode_signature(r, s)).decode("utf-8")
-
-
+# ---- 续期核心 ----
 def build_device_proof(refresh_token: str, private_pem: str) -> dict:
-    """构造 DeviceProof：对 canonical 串做 ECDSA 签名（服务端要求 PascalCase 字段名）。"""
     ts = int(time.time())
     nonce = os.urandom(16).hex()
     canonical = "\n".join(["POST", EXCHANGE_PATH, CLIENT_ID, refresh_token, str(ts), nonce])
     signature = ecdsa_sign_pure(private_pem, canonical.encode("utf-8"))
     return {"Timestamp": ts, "Nonce": nonce, "Signature": signature}
 
-
 def build_device_info(public_pem: str, device_id: str, machine_id: str) -> dict:
-    """设备指纹：保持与逆向仓库一致的精简集（Windows / 空硬件串），避免 20405。"""
     return {
         "DeviceID": device_id,
         "MachineID": machine_id or "",
@@ -346,9 +279,7 @@ def build_device_info(public_pem: str, device_id: str, machine_id: str) -> dict:
         "OSVersion": platform.release(),
     }
 
-
 def decode_jwt_exp(token: str):
-    """从 JWT 取 exp（秒）；无法解析返回 0。"""
     try:
         parts = token.split(".")
         if len(parts) != 3:
@@ -358,18 +289,14 @@ def decode_jwt_exp(token: str):
     except Exception:
         return 0
 
-
 def load_cache() -> dict:
-    """读取续期缓存 .trae_token.json（含最新 token / refreshToken / 设备私钥等）。"""
     try:
         with open(CACHE_FILE, "r", encoding="utf-8") as fh:
             return json.load(fh)
     except Exception:
         return {}
 
-
 def save_cache(cred: dict):
-    """把续期后的最新凭据落盘缓存（已加入 .gitignore）。"""
     try:
         data = {
             "token": cred.get("token", ""),
@@ -388,9 +315,7 @@ def save_cache(cred: dict):
     except Exception as e:
         print(f"[warn] 写入续期缓存失败: {e}")
 
-
 def exchange_token(cred: dict):
-    """用 refreshToken + 设备私钥换取新 token。返回 (ok, new_cred_fields, error)。"""
     refresh = cred.get("refresh_token", "").strip()
     priv = cred.get("device_key_pem", "").strip()
     pub = cred.get("device_pub_pem", "").strip()
@@ -401,8 +326,7 @@ def exchange_token(cred: dict):
     try:
         proof = build_device_proof(refresh, priv)
     except Exception as e:
-        return False, None, (f"设备证明生成失败（设备私钥材料可能无效，"
-                              f"请重新运行 python trae_checkin.py --export-keys --save 引导）: {e}")
+        return False, None, f"设备证明生成失败（设备私钥材料可能无效）: {e}"
     body = {
         "ClientID": CLIENT_ID,
         "ClientSecret": "",
@@ -435,10 +359,7 @@ def exchange_token(cred: dict):
         "refresh_expires_ms": float(res.get("RefreshExpireAt") or 0),
     }, None
 
-
 def write_back_storage(new_token: str, new_refresh: str, token_expire_ms: float, refresh_expire_ms: float):
-    """把续期结果写回本机 storage.json 的 cloudide 信封，保持桌面端 Trae 一致（避免被迫重登）。
-    仅当本机存在 storage.json 且可写时执行；失败仅告警不中断。"""
     appdata = os.environ.get("APPDATA", "")
     if not appdata:
         return
@@ -456,10 +377,10 @@ def write_back_storage(new_token: str, new_refresh: str, token_expire_ms: float,
         if new_refresh:
             auth["refreshToken"] = new_refresh
         if token_expire_ms:
-            auth["expiredAt"] = datetime.fromtimestamp(token_expire_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            auth["expiredAt"] = datetime.fromtimestamp(token_expire_ms / 1000, tz=timezone.utc).isoformat()
         if refresh_expire_ms:
-            auth["refreshExpiredAt"] = datetime.fromtimestamp(refresh_expire_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-        auth["tokenReleaseAt"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            auth["refreshExpiredAt"] = datetime.fromtimestamp(refresh_expire_ms / 1000, tz=timezone.utc).isoformat()
+        auth["tokenReleaseAt"] = datetime.now(timezone.utc).isoformat()
         st[AUTH_KEY] = encrypt_trae_auth_info(json.dumps(auth, ensure_ascii=False))
         with open(sp, "w", encoding="utf-8") as fh:
             json.dump(st, fh, ensure_ascii=False)
@@ -467,9 +388,7 @@ def write_back_storage(new_token: str, new_refresh: str, token_expire_ms: float,
     except Exception as e:
         print(f"[warn] 写回 storage.json 失败（不影响本次签到）: {e}")
 
-
 def self_heal(cred: dict):
-    """自动续期：用 refreshToken 换发新 token，更新 cred 并落盘缓存。返回 (ok, message)。"""
     ok, fields, err = exchange_token(cred)
     if not ok:
         return False, f"⚠️ {cred.get('user_id') or '未知用户'} 自动续期失败：{err}"
@@ -478,14 +397,32 @@ def self_heal(cred: dict):
     cred["expires_ms"] = fields["expires_ms"]
     cred["refresh_expires_ms"] = fields["refresh_expires_ms"]
     save_cache(cred)
-    # 本机有 Trae 桌面端时同步写回，保持两端刷新令牌一致
     write_back_storage(fields["token"], fields["refresh_token"], fields["expires_ms"], fields["refresh_expires_ms"])
     remain = (fields["expires_ms"] - datetime.now(timezone.utc).timestamp() * 1000) / 86400000
     return True, f"已自动续期 token（新有效期约 {remain:.1f} 天）"
 
+def _can_self_heal(cred: dict) -> bool:
+    return bool(cred.get("refresh_token") and cred.get("device_key_pem") and cred.get("device_pub_pem"))
 
+def _token_expiring_soon(cred: dict) -> bool:
+    exp = cred.get("expires_ms") or (decode_jwt_exp(cred.get("token", "")) * 1000)
+    if not exp:
+        return False
+    remain_h = (exp - datetime.now(timezone.utc).timestamp() * 1000) / 3600000
+    return remain_h <= 48
+
+def ensure_valid_token(cred: dict):
+    """确保 token 有效且非即将过期；若材料齐全则自动续期。返回 (ok, msg)。"""
+    if not cred.get("token"):
+        if _can_self_heal(cred):
+            return self_heal(cred)
+        return False, "未获取到 token 且无续期材料"
+    if _can_self_heal(cred) and _token_expiring_soon(cred):
+        return self_heal(cred)
+    return True, "OK"
+
+# ---- 签到 API 调用 ----
 def parse_time_ms(value) -> float:
-    """expiredAt 可能是 RFC3339/ISO 字符串或毫秒数字，统一转毫秒时间戳；无法解析返回 0。"""
     if value is None:
         return 0
     if isinstance(value, (int, float)):
@@ -507,19 +444,11 @@ def parse_time_ms(value) -> float:
     except ValueError:
         return 0
 
-
 def extract_dc_device_id(storage: dict) -> str:
-    """从 storage.json 的 iCubeAuthInfo://icube-dc:<did> 键提取真实设备 id。
-
-    逆向仓库（BlueChonk/trae-credential-reverse-engineering）证明：服务端校验的
-    x-device-id 即此 <did>，为数字格式（如 1448485154478571 / 2417165752872746），
-    与 iCubeAuthInfo://icube-dc:<numeric> 键对应；UUID 格式的 telemetry.devDeviceId
-    不被服务端识别为注册设备，可能触发更严格的限流。优先取纯数字 <did>。
-    """
     cands = []
     for k in storage.keys():
         if k.startswith("iCubeAuthInfo://icube-dc:"):
-            did = k.split(":", 3)[-1]  # iCubeAuthInfo://icube-dc:<did> 的 did 部分
+            did = k.split(":", 3)[-1]
             cands.append(did)
     numeric = [d for d in cands if d.isdigit()]
     if numeric:
@@ -528,9 +457,7 @@ def extract_dc_device_id(storage: dict) -> str:
         return cands[0]
     return ""
 
-
 def read_local_credential():
-    """读取主实例 %APPDATA%\\TRAE SOLO CN 登录态，返回完整凭据 dict（含续期材料）或 None。"""
     appdata = os.environ.get("APPDATA", "")
     if not appdata:
         return None
@@ -547,9 +474,7 @@ def read_local_credential():
         token = (auth.get("token") or "").strip()
         if not token:
             return None
-        # 真实设备 id：优先 iCubeAuthInfo://icube-dc:<numeric> 键，回退到 telemetry.devDeviceId
         device_id = extract_dc_device_id(storage) or (storage.get("telemetry.devDeviceId") or "").strip()
-        # 设备 ECDSA 密钥对（icube-dc 信封），服务端校验 ExchangeToken 设备证明所需
         device_key_pem = device_pub_pem = ""
         if device_id:
             dev_enc = storage.get(f"iCubeAuthInfo://icube-dc:{device_id}")
@@ -574,28 +499,18 @@ def read_local_credential():
         print(f"[warn] 解析 {storage_path} 失败: {e}")
         return None
 
-
 def resolve_credentials():
-    """读取环境变量 + 续期缓存（缓存优先），返回完整凭据 dict。
-
-    自愈所需材料（一次性引导后持续有效）：
-        TRAE_TOKEN / TRAE_DEVICE_ID / TRAE_USER_ID         —— 基础登录态
-        TRAE_REFRESH_TOKEN / TRAE_DEVICE_KEY_PEM /          —— 自动续期材料
-        TRAE_DEVICE_PUB_PEM / TRAE_MACHINE_ID
-    缓存 .trae_token.json 在每次成功续期后写回，是续期后的权威来源。
-    """
     cred = {
         "token": os.environ.get("TRAE_TOKEN", "").strip(),
         "device_id": os.environ.get("TRAE_DEVICE_ID", "").strip(),
         "user_id": os.environ.get("TRAE_USER_ID", "").strip(),
         "refresh_token": os.environ.get("TRAE_REFRESH_TOKEN", "").strip(),
-        "device_key_pem": _normalize_pem(os.environ.get("TRAE_DEVICE_KEY_PEM", "")),
-        "device_pub_pem": _normalize_pem(os.environ.get("TRAE_DEVICE_PUB_PEM", "")),
+        "device_key_pem": _normalize_pem(os.environ.get("TRAE_DEVICE_KEY_PEM", ""), "PRIVATE"),
+        "device_pub_pem": _normalize_pem(os.environ.get("TRAE_DEVICE_PUB_PEM", ""), "PUBLIC"),
         "machine_id": os.environ.get("TRAE_MACHINE_ID", "").strip(),
         "expires_ms": 0,
         "refresh_expires_ms": 0,
     }
-    # 缓存优先覆盖（续期后刷新令牌会轮换，env 里的旧 refresh 会失效）
     cache = load_cache()
     if cache:
         for k in ("token", "device_id", "user_id", "refresh_token",
@@ -604,7 +519,6 @@ def resolve_credentials():
             if cache.get(k):
                 cred[k] = cache[k]
     return cred
-
 
 AUTH_FAIL_KEYWORDS = ("unauthorized", "token", "expired", "not login",
                       "not logged", "登录", "鉴权", "authenticate")
@@ -623,7 +537,6 @@ def api_succeeded(data: dict) -> bool:
         return True
     return str(data.get("status", "")).lower() == "success"
 
-
 def is_auth_failure(http_status: int, data) -> bool:
     if http_status in (401, 403):
         return True
@@ -631,7 +544,6 @@ def is_auth_failure(http_status: int, data) -> bool:
         return False
     try:
         code = int(str(data.get("code")))
-        # 业务层鉴权失败：1001 = 无法认证（token 失效/无效，服务端常以 HTTP 200 + code 返回）
         if code in (401, 403, 1001):
             return True
     except (TypeError, ValueError):
@@ -641,9 +553,7 @@ def is_auth_failure(http_status: int, data) -> bool:
         return False
     return any(k.lower() in msg for k in AUTH_FAIL_KEYWORDS)
 
-
 def is_rate_limited(http_status: int, data) -> bool:
-    """服务端活动限流：HTTP 429/5xx 或业务消息命中限频关键词。"""
     if http_status in (429, 500, 502, 503, 504):
         return True
     if not isinstance(data, dict):
@@ -651,15 +561,7 @@ def is_rate_limited(http_status: int, data) -> bool:
     msg = str(data.get("message") or data.get("msg") or "")
     return any(k in msg for k in RATE_LIMIT_KEYWORDS)
 
-
-# 请求头：对齐逆向仓库 BlueChonk/trae-credential-reverse-engineering 中
-# traeClient.ts#postUg 的实测最小集（checkin_status / checkin_claim 仅发这 3 个头）：
-#   - Content-Type:    application/json
-#   - Authorization:   Cloud-IDE-JWT <token>
-#   - x-device-id:     <数字格式设备 id，取自 iCubeAuthInfo://icube-dc:<numeric> 键>
-# 逆向证明该端点的服务端校验只认这 3 个头；附加 UA / 多余 x-* 头反而偏离真机。
 def build_checkin_headers(token: str, device_id: str) -> dict:
-    """签到/状态/积分接口共用的请求头，对齐逆向仓库 postUg 的最小集。"""
     return {
         "content-type": "application/json",
         "authorization": token if str(token).startswith("Cloud-IDE-JWT ")
@@ -667,32 +569,24 @@ def build_checkin_headers(token: str, device_id: str) -> dict:
         "x-device-id": device_id or "",
     }
 
-
 def api_call(host, token, device_id, path, body=None, timeout=30):
-    """发起签到接口请求。
-
-    静默运行：成功不输出；仅当 HTTP 非 200（传输层失败）或请求异常时，打印一行
-    简短日志（路径 + HTTP 状态 + 截断响应体），且绝不打印任何鉴权头与 token。
-    """
+    """发起签到接口请求，静默运行，仅出错时打印简短信息。"""
     headers = build_checkin_headers(token, device_id)
     url = f"{host}{path}"
     req_body = json.dumps(body or {})
 
     try:
-        # 用 PreparedRequest 精确控制最终发出的 header，避免 requests 自动注入多余默认值
         req = requests.Request("POST", url, headers=headers, data=req_body)
         prepared = req.prepare()
-
         session = requests.Session()
-        # proxies=None 强制直连 api.trae.cn，避免走系统/本地代理导致被限频或连不上
-        r = session.send(prepared, timeout=timeout, proxies={"http": None, "https": None})
+        session.trust_env = False  # 禁用代理，强制直连
+        r = session.send(prepared, timeout=timeout)
 
         try:
             data = r.json()
         except Exception:
             data = {"raw": r.text[:300]}
 
-        # 成功静默；仅传输层失败时打印一行简短日志（不含 token）
         if r.status_code != 200:
             print(f"[trae] {path} -> HTTP {r.status_code} {r.text[:200]}")
         return r.status_code, data
@@ -700,9 +594,7 @@ def api_call(host, token, device_id, path, body=None, timeout=30):
         print(f"[trae] {path} 请求异常: {e}")
         return 0, {"error": str(e)}
 
-
 def query_points(host, token, device_id):
-    """查询剩余积分（entitlement_list 结构化解析，失败则忽略）。"""
     sc, sb = api_call(host, token, device_id, ENTITLEMENT_PATH,
                       body={"require_usage": True}, timeout=15)
     try:
@@ -722,48 +614,17 @@ def query_points(host, token, device_id):
         pass
     return None
 
-
-def _can_self_heal(cred: dict) -> bool:
-    """是否具备自动续期所需的材料（refreshToken + 设备 ECDSA 私钥 + 公钥）。"""
-    return bool(cred.get("refresh_token") and cred.get("device_key_pem") and cred.get("device_pub_pem"))
-
-
 def checkin_once(cred: dict):
-    """执行单次签到，返回 (结果标记, 通知文本)。
-
-    自愈策略（材料齐备时）：
-      - 无 token：先用 refreshToken 续期再签到；
-      - token 即将过期（<48h）：先续期，避免拿到马上失效的 token；
-      - 状态/领取返回鉴权失败：自动续期并重试一次。
-    材料缺失（纯环境变量 token、未引导设备私钥）时退化为原行为并给出可读指引。
-    """
+    """执行单次签到，返回 (结果标记, 通知文本)。"""
     cred = cred or {}
-    token = cred.get("token", "").strip()
+    # 确保 token 有效（无 token 或即将过期则自动续期）
+    ok, msg = ensure_valid_token(cred)
+    if not ok:
+        return "NO_CREDENTIAL", f"⚠️ {msg}"
+
+    token = cred["token"]
     device_id = cred.get("device_id", "")
-
-    # 无 token 但有续期材料：先续期再签到
-    if not token:
-        if _can_self_heal(cred):
-            ok, msg = self_heal(cred)
-            if not ok:
-                return "AUTH_EXPIRED", f"⚠️ 未获取到 token 且自动续期失败：{msg}"
-            token = cred["token"]
-            print(f"[trae] {msg}")
-        else:
-            return "NO_CREDENTIAL", ("未获取到 Trae 登录态，请设置环境变量 TRAE_TOKEN / TRAE_DEVICE_ID"
-                                     "（或运行 python trae_checkin.py --export-keys --save 引导自动续期）")
-
     host = HOST
-
-    # token 即将过期（<48h）或已过期且可自愈：先续期，避免用失效 token 去签到
-    if _can_self_heal(cred):
-        exp = cred.get("expires_ms") or (decode_jwt_exp(token) * 1000)
-        remain_h = (exp - datetime.now(timezone.utc).timestamp() * 1000) / 3600000
-        if remain_h <= 48:
-            ok, msg = self_heal(cred)
-            if ok:
-                token = cred["token"]
-                print(f"[trae] {msg}")
 
     # 1) 状态查询
     sc, sb = api_call(host, token, device_id, STATUS_PATH)
@@ -771,6 +632,7 @@ def checkin_once(cred: dict):
         pts = query_points(host, token, device_id)
         extra = f"，剩余积分 {pts}" if pts is not None else ""
         return "ALREADY_TODAY", f"ℹ️ 今日已签到{extra}"
+
     if is_auth_failure(sc, sb):
         if _can_self_heal(cred):
             ok, msg = self_heal(cred)
@@ -822,10 +684,8 @@ def checkin_once(cred: dict):
         return "RATE_LIMITED", f"⏳ 服务端限频（活动高峰容量不足，与请求特征无关）：{msg}，建议错峰或稍后重试"
     return "FAIL", f"⚠️ 签到未成功：HTTP {cc} {msg}"
 
-
+# ---- 命令行功能 ----
 def export_env():
-    """--export-env / --export-keys：从本机登录态解密并打印完整环境变量（含自动续期材料）。
-    追加 --save 直接写回同目录 .env，并写入续期缓存 .trae_token.json。"""
     c = read_local_credential()
     if not c:
         print("未发现 Trae 登录态，请先在本机登录 Trae 桌面端")
@@ -850,7 +710,6 @@ def export_env():
         n = _save_env_values(values)
         if n:
             print(f"# 已将上述 {n} 个变量写回 .env")
-        # 同时写入续期缓存（与 .env 互为备份，缓存为续期后权威来源）
         save_cache({
             "token": c["token"],
             "refresh_token": c["refresh_token"],
@@ -864,12 +723,9 @@ def export_env():
         print(f"# 已写入续期缓存 {os.path.basename(CACHE_FILE)}")
     return 0
 
-
 def renew_cmd():
-    """--renew：用 refreshToken 续期，写回缓存与（本机存在时）storage.json。"""
     cred = resolve_credentials()
     if not _can_self_heal(cred):
-        # 环境/缓存无材料时，尝试从本机 storage.json 引导
         c = read_local_credential()
         if c:
             cred.update({k: c[k] for k in ("token", "device_id", "user_id", "expires_ms",
@@ -883,12 +739,9 @@ def renew_cmd():
     print(msg)
     return 0 if ok else 1
 
-
 def main():
-    # python trae_checkin.py --export-env / --export-keys  仅导出环境变量后退出
     if "--export-env" in sys.argv or "--export-keys" in sys.argv:
         sys.exit(export_env())
-    # python trae_checkin.py --renew  仅续期（写回缓存与 storage.json）
     if "--renew" in sys.argv:
         sys.exit(renew_cmd())
 
@@ -903,7 +756,6 @@ def main():
             sendNotify.serverJMy(title, content)
         except Exception as e:
             print(f"[warn] 通知发送失败: {e}")
-
 
 if __name__ == "__main__":
     main()
