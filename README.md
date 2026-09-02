@@ -100,12 +100,10 @@ export TRAE_MACHINE_ID=
 #   务必保证 MINIMAX_USER_ID = storage.json 里的 realUserID（不是 JWT 的 user.id），否则 status/claim 直 401
 #   （renewal 不校验 user_id，故表现为「续期成功但签到 401」）。
 #
-# 服务器出口被透明 TLS 网关【全阻断】时，可经本地代理出网（优先级高者优先）：
-#   1) MINIMAX_PROXY ：你自己起的外部代理（clash/xray 等），如 export MINIMAX_PROXY='http://127.0.0.1:10808'
-#   2) MINIMAX_SUB    ：VLESS 订阅地址，脚本自动抓取并由内置零依赖代理（vless_proxy.py，纯标准库，
-#                       不依赖任何外部客户端、不下载二进制）在签到前拉起本地代理，结束后自动关闭
-#   3) MINIMAX_VLESS  ：单条 vless:// 链接，同样由内置零依赖代理拉起本地代理
-#   推荐用订阅（节点自动滚动，单点失效不影响）。订阅地址示例（整条用【单引号】包裹）：
+# 服务器出口被透明 TLS 网关【全阻断】时，可经 VLESS 订阅由内置零依赖代理出网：
+#   MINIMAX_SUB 指定订阅地址，脚本自动抓取并由内置零依赖代理（vless_proxy.py，纯标准库，
+#   不依赖任何外部客户端、不下载二进制）在签到前拉起本地代理，结束后自动关闭
+#   （节点自动滚动，单点失效不影响）。订阅地址示例（整条用【单引号】包裹）：
 #       export MINIMAX_SUB='https://rom.msdmcp.top/sub?token=54fb6f9b95583ec8ad17bad7493a276f'
 # token 失效/过期时：先去 MiniMax Agent 客户端重新登录（让其写回新 token），再在本机执行：
 #   python minimax_checkin.py --export-env --save  即可把最新 token/设备参数写回 .env
@@ -118,10 +116,8 @@ export MINIMAX_UUID=
 export MINIMAX_DEVICE_ID=
 # 可选：覆盖本机登录态配置文件路径（仅 --export-env 读取时使用，默认 %APPDATA%\MiniMax Agent\minimax-agent-config.json）
 export MINIMAX_CONFIG_PATH=
-# 可选：出网代理（出口被网关阻断时用到；默认直连）。优先级：MINIMAX_PROXY > MINIMAX_SUB > MINIMAX_VLESS
-export MINIMAX_PROXY=
+# 可选：出网代理（出口被网关阻断时用到；默认直连）。由 MINIMAX_SUB 指定 VLESS 订阅地址
 export MINIMAX_SUB=
-export MINIMAX_VLESS=
 # 可选：设 1 关闭 token 缓存文件；设 MINIMAX_SAVE_ENV=0 则只写缓存不改写 .env
 export MINIMAX_NO_CACHE=
    ```

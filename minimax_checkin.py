@@ -497,60 +497,39 @@ def is_rate_limited(http_status: int, data) -> bool:
 
 
 # ===== 经代理出网（绕过透明 TLS 拦截网关）=====
-# 当服务器出口被网关全阻断时，经一个本地 HTTP 代理干净出网。
-# 代理优先级（高者优先）：
-#   1) MINIMAX_PROXY : 你自己起的外部代理地址（clash/xray 等），如 http://127.0.0.1:10808
-#   2) MINIMAX_SUB   : VLESS 订阅地址，脚本自动抓取并由内置零依赖代理拉起本地代理
-#   3) MINIMAX_VLESS : 单条 vless:// 链接，同样由内置零依赖代理拉起本地代理
-# 内置代理（vless_proxy.py）仅用标准库，不依赖任何外部客户端、不下载二进制，
-# 在签到前拉起、checkin_once 结束（finally）时自动关闭。
+# 当服务器出口被网关全阻断时，经 VLESS 订阅由内置零依赖代理（vless_proxy.py，纯标准库，
+# 不依赖任何外部客户端、不下载二进制）拉起本地 HTTP 代理干净出网；签到前拉起，
+# checkin_once 结束（finally）时自动关闭。订阅地址由 MINIMAX_SUB 指定。
 # 订阅地址示例：https://rom.msdmcp.top/sub?token=54fb6f9b95583ec8ad17bad7493a276f
 _PROXIES = None        # requests 代理 dict，start_proxy_from_env() 设置
 _PROXY_INSTANCE = None  # 内置 VlessProxy 实例，stop_proxy() 时关闭
 
 
 def start_proxy_from_env():
-    """按优先级决定出网代理。返回是否启用。"""
+    """读 MINIMAX_SUB（VLESS 订阅地址）拉起内置零依赖代理。返回是否启用。"""
     global _PROXIES, _PROXY_INSTANCE
     if _PROXIES is not None:
         return True
-    # 1) 显式外部代理
-    explicit = clean_env_value(os.environ.get("MINIMAX_PROXY", ""))
-    if explicit:
-        _PROXIES = {"http": explicit, "https": explicit}
-        print(f"[miniMax] 使用显式代理：{explicit}")
-        return True
-    # 2) 订阅地址：抓取后由内置零依赖代理拉起本地代理
     sub = clean_env_value(os.environ.get("MINIMAX_SUB", ""))
-    if sub:
-        try:
-            links = fetch_subscription(sub)
-        except Exception as e:
-            print(f"[miniMax] 抓取订阅失败：{e}")
-            links = []
-        if links:
-            try:
-                inst = VlessProxy(links, local_port=10808, verify=True)
-                url = inst.start()
-                _PROXIES = {"http": url, "https": url}
-                _PROXY_INSTANCE = inst
-                print(f"[miniMax] 已用内置零依赖代理拉起本地代理：{url}（{len(links)} 节点）")
-                return True
-            except Exception as e:
-                print(f"[miniMax] 拉起内置代理失败：{e}")
-    # 3) 单条 vless 链接
-    vless = clean_env_value(os.environ.get("MINIMAX_VLESS", ""))
-    if vless:
-        try:
-            inst = VlessProxy([vless], local_port=10808, verify=True)
-            url = inst.start()
-            _PROXIES = {"http": url, "https": url}
-            _PROXY_INSTANCE = inst
-            print(f"[miniMax] 已用内置零依赖代理拉起本地代理：{url}")
-            return True
-        except Exception as e:
-            print(f"[miniMax] 拉起内置代理失败：{e}")
-    return False
+    if not sub:
+        return False
+    try:
+        links = fetch_subscription(sub)
+    except Exception as e:
+        print(f"[miniMax] 抓取订阅失败：{e}")
+        return False
+    if not links:
+        return False
+    try:
+        inst = VlessProxy(links, local_port=10808, verify=True)
+        url = inst.start()
+        _PROXIES = {"http": url, "https": url}
+        _PROXY_INSTANCE = inst
+        print(f"[miniMax] 已用内置零依赖代理拉起本地代理：{url}（{len(links)} 节点）")
+        return True
+    except Exception as e:
+        print(f"[miniMax] 拉起内置代理失败：{e}")
+        return False
 
 
 def stop_proxy():
@@ -587,7 +566,7 @@ def _do_request(connect_base, token, params, path, method, body, timeout, proxie
 
 
 def api_call(host, token, params, path, method="GET", body=None, timeout=30):
-    """带签名的请求。若已配置出网代理（MINIMAX_PROXY / MINIMAX_SUB / MINIMAX_VLESS 任一），请求走本地代理直连域名。"""
+    """带签名的请求。若已配置 MINIMAX_SUB 订阅代理，请求走本地代理直连域名。"""
     proxies = _PROXIES or None
     sc, sb = _do_request(host, token, params, path, method, body, timeout, proxies)
     return sc, sb
