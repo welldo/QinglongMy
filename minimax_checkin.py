@@ -30,16 +30,6 @@
 因此 401 基本只可能是 **token 本身不对**（过期/被截断/粘贴时带引号/串号），
 本脚本会在失败信息里直接打印 token 剩余有效期与服务端原始报错，一眼可定位。
 
-【DNS 污染（服务器/被管控网络跑总失败的真正元凶）】
-实测发现：在被管控的服务器/网关上，`agent.minimax.io` 会被本地 DNS 解析到假 IP
-（如 `198.20.0.x` 拦截网关，连接时 TLS 证书不匹配），表现为「连不上 / 偶发 401」，
-**与 token 是否过期无关**（token 明明还有几十天有效却连不到真服务器）。
-本脚本已内置【反 DNS 污染】回退：默认域名直连；一旦连接层失败，自动用 DoH
-（dns.google，直连 8.8.8.8:443，不受本地污染 DNS 影响）解析出 Akamai 真实边缘 IP，
-再以「真实 IP 直连 + Host 头=域名」绕过。如 DoH 也不可达，可手动设置环境变量
-MINIMAX_REAL_IP=<真实IPv4> 强制指定（可在本机 `nslookup agent.minimax.io 8.8.8.8` 或
-通过 DoH 取得）。
-
 【签名机制（逆向 app.asar 结论）】
 桌面端在 axios 请求拦截器中对每个请求计算两套签名头：
 
@@ -99,17 +89,7 @@ import urllib.parse
 from datetime import datetime, timezone
 
 import requests
-import urllib3
 
-import subprocess
-import shutil
-import atexit
-import tempfile
-
-# MiniMax 域名在某些网络环境（如被管控的服务器/网关）会被 DNS 污染到假 IP，
-# 导致连接失败。绕过方案：连接层失败时改用 DoH 动态解析真实 IP 直连（见 api_call）。
-# 直连 IP 时 SNI 与证书 CN 不匹配，需关闭证书校验（仅跳过校验，Host 头仍指向真实域名）。
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -512,310 +492,18 @@ def is_rate_limited(http_status: int, data) -> bool:
     return any(k in msg for k in RATE_LIMIT_KEYWORDS)
 
 
-# ===== 反 DNS 污染：连接失败时改用真实 IP 直连 =====
-# 某些网络（被管控的服务器/网关）会把 agent.minimax.io 解析到假 IP（如 198.20.0.x 拦截网关），
-# 导致连接失败或伪 401。此时运行时解析出 Akamai 真实边缘 IP，再用「真实 IP 直连 +
-# Host 头=域名 + verify=False」绕过。Akamai IP 动态变化，故必须运行时解析，不可硬编码。
-# 解析优先走「原始 UDP/53 直连公共解析器」（绕过本地被污染的递归解析器，且多数网络
-# 即便封锁 8.8.8.8:443 也放行 UDP/53）；UDP 不可达时再用 HTTPS DoH 兜底。
-import socket as _sock
-import struct as _struct
-import base64 as _b64
-
-_RESOLVED = {}   # 进程内缓存：domain -> 已验证可用的真实 IP
-_POISON_PREFIX = "198.20.0."   # 已知拦截网关网段，解析到此处视为污染，直接跳过
-
-
-def _domain_of(host: str) -> str:
-    return host.split("//", 1)[-1].split("/", 1)[0] or host
-
-
-def _dns_query_wire(domain: str) -> bytes:
-    """构造一条 A 记录查询报文（DNS 线格式），供 UDP 直连与 HTTPS DoH 复用。"""
-    txid = b"\x13\x57"
-    header = txid + _struct.pack(">H", 0x0100) + _struct.pack(">H", 1) + b"\x00\x00\x00\x00\x00\x00"
-    q = b""
-    for label in domain.split("."):
-        q += bytes([len(label)]) + label.encode("ascii")
-    q += b"\x00" + _struct.pack(">H", 1) + _struct.pack(">H", 1)   # QTYPE=A, QCLASS=IN
-    return header + q
-
-
-def _parse_a_records(data: bytes):
-    """从 DNS 响应里抽出所有 A 记录 IPv4（兼容响应中的名称压缩指针）。"""
-    if len(data) < 12:
-        return []
-    n = _struct.unpack(">H", data[6:8])[0]
-    i = 12
-    while i < len(data) and data[i] != 0 and not (data[i] & 0xC0):
-        i += 1
-    if i >= len(data):
-        return []
-    i += 1 + 4   # 结尾 0 + QTYPE(2) + QCLASS(2)
-    ips = []
-    for _ in range(n):
-        if i >= len(data):
-            break
-        if data[i] & 0xC0:
-            i += 2
-        else:
-            while i < len(data) and data[i] != 0:
-                i += 1
-            i += 1
-        if i + 10 > len(data):
-            break
-        typ, _cls, _ttl, rdlen = _struct.unpack(">HHIH", data[i:i + 10])
-        i += 10
-        if typ == 1 and rdlen == 4 and i + 4 <= len(data):
-            ips.append(".".join(str(b) for b in data[i:i + 4]))
-        i += rdlen
-    return ips
-
-
-_UDP_RESOLVERS = ["223.5.5.5", "119.29.29.29", "8.8.8.8", "1.1.1.1"]
-
-
-def _udp_resolve(domain: str):
-    """原始 UDP/53 直连公共解析器，绕过本地被污染的递归解析器。失败返回 []。"""
-    pkt = _dns_query_wire(domain)
-    for r in _UDP_RESOLVERS:
-        try:
-            s = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
-            s.settimeout(5)
-            s.sendto(pkt, (r, 53))
-            data, _ = s.recvfrom(4096)
-            s.close()
-            ips = _parse_a_records(data)
-            if ips:
-                return ips
-        except Exception:
-            try:
-                s.close()
-            except Exception:
-                pass
-    return []
-
-
-# DoH 供应商：(url, 线格式?, 是否走系统代理?)。
-# - 主机名类（cloudflare-dns.com / dns.google）走系统代理，且依赖「网关只毒特定域名」的假设：
-#   若管控网关仅劫持 agent.minimax.io、不劫持这些 DoH 主机名，则它们能解析出真实 IP。
-# - IP 类（223.5.5.5 / 8.8.8.8）强制直连（proxies=None），用于能直连公共解析器的网络。
-_DOH_PROVIDERS = [
-    ("https://cloudflare-dns.com/dns-query", True, True),   # 主机名，走系统代理
-    ("https://dns.google/resolve", False, True),             # 主机名，走系统代理
-    ("https://223.5.5.5/dns-query", True, False),            # 阿里 AliDNS DoH（线格式 dns=）
-    ("https://8.8.8.8/resolve", False, False),               # Google DoH（name/type 格式）
-]
-
-# 最后兜底：当前（解析时）有效的 Akamai 边缘 IP。Akamai 边缘会轮换，故仅当 UDP/53 与
-# 全部 DoH 均不可达时才用；api_call 回退循环会跳过污染网段与 nginx 404 的死边缘。
-_FALLBACK_IPS = ["2.16.168.107", "2.16.168.102", "23.46.216.82", "23.32.91.196", "23.32.91.197"]
-
-
-def _doh_resolve(domain: str):
-    """HTTPS DoH 解析真实 IPv4（UDP/53 不可达时的兜底）。失败返回 []。"""
-    wire = _b64.urlsafe_b64encode(_dns_query_wire(domain)).rstrip(b"=").decode()
-    last_err = ""
-    for url, wire_fmt, use_proxy in _DOH_PROVIDERS:
-        try:
-            if wire_fmt:
-                params, headers = {"dns": wire}, {"Accept": "application/dns-message"}
-            else:
-                params, headers = {"name": domain, "type": "A"}, {"Accept": "application/dns-json"}
-            proxies = None if not use_proxy else {}   # use_proxy=True 时让 requests 用环境代理
-            r = requests.get(url, params=params, headers=headers,
-                             timeout=10, verify=False, proxies=proxies)
-            ips = []
-            try:
-                j = r.json()   # Google 等返回 JSON
-                ips = [a["data"] for a in j.get("Answer", []) if a.get("type") == 1]
-            except Exception:
-                # AliDNS / Cloudflare 等可能返回二进制 application/dns-message，按线格式解析
-                ips = _parse_a_records(r.content)
-            if ips:
-                return ips
-        except Exception as e:
-            last_err = f"{url}: {e}"
-    if last_err:
-        print(f"[miniMax] DoH 兜底解析 {domain} 失败：{last_err}")
-    return []
-
-
-def _resolve_real_ips(host: str):
-    """返回真实 IP 候选列表（按成功率排序）：
-    MINIMAX_REAL_IP 手动覆盖 > 主机名 DoH > UDP/53 > IP DoH > 内置兜底 IP。"""
-    manual = clean_env_value(os.environ.get("MINIMAX_REAL_IP", ""))
-    if manual:
-        return [manual]
-    domain = _domain_of(host)
-    ips = _doh_resolve(domain)          # 主机名 DoH 优先（可能绕过仅毒特定域名的网关）
-    if ips:
-        print(f"[miniMax] DoH 解析 {domain} -> {ips}")
-        return ips
-    ips = _udp_resolve(domain)
-    if ips:
-        print(f"[miniMax] UDP/53 解析 {domain} -> {ips}")
-        return ips
-    if _FALLBACK_IPS:
-        print(f"[miniMax] 解析均不可达，使用内置兜底 IP：{_FALLBACK_IPS}")
-    return list(_FALLBACK_IPS)
-
-
 # ===== 经代理出网（绕过透明 TLS 拦截网关）=====
-# 当服务器出口被网关(198.20.0.6)全阻断（所有真实 IP 均 nginx 404）时，可经一个 VLESS
-# 代理干净出网。做法：用 xray-core 把 vless 配置在本地拉起 HTTP 代理(127.0.0.1:10808)，
-# 再让 requests 走该本地代理。用 http inbound（非 socks），无需 PySocks。
-# 配置来源（任选其一，优先级高者优先）：
+# 当服务器出口被网关全阻断时，可经一个本地 HTTP 代理干净出网。
+# 代理由你自己的客户端（clash / xray 等，直接消费订阅地址）拉起，
+# 脚本只读取其本地地址，不绑定 / 不拉起任何代理核心：
 #   MINIMAX_PROXY : 已运行的本地代理 URL，如 http://127.0.0.1:10808
-#                   （你自行起好 xray/v2ray 时填，脚本不再拉进程）
-#   MINIMAX_VLESS : 一段 vless://... 链接，脚本自动拉起 xray-core 建本地代理
-_PROXIES = None          # requests 代理 dict，start_proxy_from_env() 设置
-_PROXY_PROC = None       # xray 子进程句柄
-_PROXY_CFG = None        # xray 临时配置文件
-
-
-def _find_xray():
-    """在 PATH 与常见安装位置找 xray / vray 可执行文件；找不到返回 None。"""
-    for name in ("xray", "xray.exe", "v2ray", "v2ray.exe"):
-        p = shutil.which(name)
-        if p:
-            return p
-    for cand in ("/usr/local/bin/xray", "/usr/bin/xray", "/ql/xray",
-                 "/usr/local/bin/v2ray", "/usr/bin/v2ray"):
-        if os.path.isfile(cand) and os.access(cand, os.X_OK):
-            return cand
-    return None
-
-
-def _parse_vless_url(url: str):
-    """解析 vless://uuid@host:port?query#tag -> dict。失败抛 ValueError。"""
-    if not url.startswith("vless://"):
-        raise ValueError("不是 vless:// 链接")
-    body = url[len("vless://"):]
-    if "#" in body:
-        body = body.split("#", 1)[0]
-    if "?" in body:
-        addr, query = body.split("?", 1)
-    else:
-        addr, query = body, ""
-    if "@" not in addr:
-        raise ValueError("vless 链接缺少 @（应为 vless://uuid@host:port）")
-    uuid, hostport = addr.split("@", 1)
-    if ":" not in hostport:
-        raise ValueError("vless 链接缺少端口")
-    server, port = hostport.rsplit(":", 1)
-    q = urllib.parse.parse_qs(query)
-    get = lambda k, d="": (q.get(k, [d])[0] if q.get(k) else d)
-    return {
-        "uuid": uuid,
-        "server": server,
-        "port": int(port),
-        "security": get("security", "tls"),
-        "net": get("type", "ws"),
-        "host": get("host", server),
-        "sni": get("sni", get("host", server)),
-        "path": get("path", "/"),
-        "fp": get("fp", ""),
-        "encryption": get("encryption", "none"),
-    }
-
-
-def _build_xray_config(v: dict, local_port: int):
-    """由 vless 参数生成 xray-core 配置（本地 http inbound + vless outbound）。"""
-    tls_settings = {"serverName": v["sni"]}
-    if v["fp"]:
-        tls_settings["fingerprint"] = v["fp"]      # uTLS 指纹，匹配客户端 fp=chrome
-    out = {
-        "protocol": "vless",
-        "settings": {
-            "vnext": [{
-                "address": v["server"],
-                "port": v["port"],
-                "users": [{"id": v["uuid"], "encryption": v["encryption"], "flow": ""}],
-            }],
-        },
-        "streamSettings": {
-            "network": v["net"],
-            "security": v["security"],
-            "tlsSettings": tls_settings,
-        },
-    }
-    if v["net"] == "ws":
-        out["streamSettings"]["wsSettings"] = {
-            "path": v["path"] or "/",
-            "headers": {"Host": v["host"] or v["server"]},
-        }
-    elif v["net"] == "grpc":
-        out["streamSettings"]["grpcSettings"] = {"serviceName": v["path"].lstrip("/")}
-    return {
-        "log": {"loglevel": "warning"},
-        "inbounds": [{
-            "protocol": "http",
-            "listen": "127.0.0.1",
-            "port": local_port,
-            "settings": {},
-        }],
-        "outbounds": [out, {"protocol": "freedom", "tag": "direct"}],
-    }
-
-
-def _wait_port(port, timeout=20):
-    end = time.time() + timeout
-    while time.time() < end:
-        try:
-            s = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
-            s.settimeout(1)
-            s.connect(("127.0.0.1", port))
-            s.close()
-            return True
-        except Exception:
-            time.sleep(0.5)
-    return False
-
-
-def ensure_vless_proxy(vless_url: str, local_port: int = 10808):
-    """拉起 xray-core 本地 HTTP 代理。成功返回 proxies dict，失败返回 None。"""
-    binp = _find_xray()
-    if not binp:
-        print("[miniMax] 未找到 xray/v2ray 可执行文件，无法经代理出网。\n"
-              "          安装：bash <(curl -L https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh)\n"
-              "          或自行起好代理后把地址填入 MINIMAX_PROXY。")
-        return None
-    try:
-        v = _parse_vless_url(vless_url)
-    except Exception as e:
-        print(f"[miniMax] 解析 vless 链接失败：{e}")
-        return None
-    cfg = _build_xray_config(v, local_port)
-    fd, cfgpath = tempfile.mkstemp(suffix=".json", prefix="xray_minimax_")
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        json.dump(cfg, fh)
-    try:
-        proc = subprocess.Popen([binp, "-c", cfgpath],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception as e:
-        print(f"[miniMax] 启动 xray 失败：{e}")
-        os.remove(cfgpath)
-        return None
-    if not _wait_port(local_port, 20):
-        print("[miniMax] xray 已启动但本地代理端口未就绪（配置或网络问题），放弃代理出网")
-        try:
-            proc.terminate()
-        except Exception:
-            pass
-        os.remove(cfgpath)
-        return None
-    print(f"[miniMax] 已用 xray({binp}) 在 127.0.0.1:{local_port} 拉起本地 HTTP 代理（vless→{v['server']}:{v['port']}）")
-    global _PROXY_PROC, _PROXY_CFG
-    _PROXY_PROC = proc
-    _PROXY_CFG = cfgpath
-    atexit.register(stop_proxy)
-    return {"http": f"http://127.0.0.1:{local_port}",
-            "https": f"http://127.0.0.1:{local_port}"}
+# 订阅地址由你的客户端消费（脚本不抓取）：
+#   https://rom.msdmcp.top/sub?token=54fb6f9b95583ec8ad17bad7493a276f
+_PROXIES = None   # requests 代理 dict，start_proxy_from_env() 设置
 
 
 def start_proxy_from_env():
-    """读环境变量决定代理方式，设置模块全局 _PROXIES。返回是否启用。"""
+    """读 MINIMAX_PROXY 决定代理。返回是否启用。"""
     global _PROXIES
     if _PROXIES is not None:
         return True
@@ -824,50 +512,22 @@ def start_proxy_from_env():
         _PROXIES = {"http": explicit, "https": explicit}
         print(f"[miniMax] 使用显式代理：{explicit}")
         return True
-    vless = clean_env_value(os.environ.get("MINIMAX_VLESS", ""))
-    if vless:
-        p = ensure_vless_proxy(vless)
-        if p:
-            _PROXIES = p
-            return True
     return False
 
 
-def stop_proxy():
-    """清理 xray 子进程与临时配置文件。"""
-    global _PROXY_PROC, _PROXY_CFG
-    if _PROXY_PROC is not None:
-        try:
-            _PROXY_PROC.terminate()
-        except Exception:
-            pass
-        _PROXY_PROC = None
-    if _PROXY_CFG and os.path.exists(_PROXY_CFG):
-        try:
-            os.remove(_PROXY_CFG)
-        except Exception:
-            pass
-        _PROXY_CFG = None
-
-
-def _do_request(connect_base, token, params, path, method, body, timeout, host_header=None, verify=True, proxies=None):
+def _do_request(connect_base, token, params, path, method, body, timeout, proxies=None):
     """单次请求：计算签名 -> 发送 -> 返回 (status_code, json_or_raw)。"""
     signed_params, headers, body_str = _sign_request(path, token, params, method, body)
-    if host_header:
-        headers["Host"] = host_header
     url = f"{connect_base}{path}"
-    # 用 PreparedRequest 精确控制最终发出的 header，避免 requests 自动注入多余默认值
     req = requests.Request(method.upper(), url, params=signed_params,
                             headers=headers, data=body_str or None)
     prepared = req.prepare()
-    if host_header:
-        prepared.headers["Host"] = host_header
     try:
         session = requests.Session()
-        # proxies=None 时回落到模块全局 _PROXIES（若已配置代理）；否则强制直连
+        # proxies=None 时回落到模块全局 _PROXIES（若已配置代理）；否则直连
         if proxies is None:
-            proxies = _PROXIES or {"http": None, "https": None}
-        r = session.send(prepared, timeout=timeout, proxies=proxies, verify=verify)
+            proxies = _PROXIES or None
+        r = session.send(prepared, timeout=timeout, proxies=proxies)
         try:
             return r.status_code, r.json()
         except Exception:
@@ -877,60 +537,10 @@ def _do_request(connect_base, token, params, path, method, body, timeout, host_h
 
 
 def api_call(host, token, params, path, method="GET", body=None, timeout=30):
-    """带签名的请求，内置反 DNS 污染回退。
-
-    正常网络：域名直连（verify=True）。若连接层失败（sc==0，多为 DNS 污染/拦截网关/
-    TLS 证书不匹配被吞为错误），自动用 DoH 解析真实 Akamai IP 直连（verify=False + Host=域名）。
-    """
-    domain = _domain_of(host)
-    # 0) 已配置出网代理(vless/本地)：优先经代理直连域名（代理侧为干净出口，绕过网关污染）
-    if _PROXIES:
-        sc, sb = _do_request(host, token, params, path, method, body, timeout,
-                             None, verify=True, proxies=_PROXIES)
-        if sc != 0:
-            return sc, sb
-        err = (sb or {}).get("error") if isinstance(sb, dict) else str(sb)
-        print(f"[miniMax] 经代理直连失败（{err}），回退反污染兜底…")
-    if domain in _RESOLVED and _RESOLVED[domain]:
-        # 本次进程已探明可用真实 IP，直接走它（不再依赖被污染的 DNS）
-        sc, sb = _do_request(f"https://{_RESOLVED[domain]}", token, params, path,
-                             method, body, timeout, domain, verify=False,
-                             proxies={"http": None, "https": None})
-        return sc, sb
-
-    sc, sb = _do_request(host, token, params, path, method, body, timeout, None,
-                         verify=True, proxies={"http": None, "https": None})
-    # 正常响应（非连接失败、非疑似拦截网关的 401）直接返回
-    if sc not in (0, 401):
-        return sc, sb
-
-    # 连接层失败(sc==0) 或 疑似被拦截网关返回 401：改用 DoH 解析真实 IP 直连
-    # （部分被管控网关会伪装成「HTTP 401」而非 TLS 错误，因此一并触发回退）
-    reason = "连接失败（疑似 DNS 污染到假 IP）" if sc == 0 else "HTTP 401（疑似被拦截网关伪响应）"
-    err0 = (sb or {}).get("error") if isinstance(sb, dict) else str(sb)
-    print(f"[miniMax] 域名直连{reason}：{err0}；尝试 DoH 解析真实 IP 绕过…")
-    last_err = err0
-    for ip in _resolve_real_ips(host):
-        if ip.startswith(_POISON_PREFIX):   # 解析结果仍是拦截网关，跳过
-            print(f"[miniMax] 跳过疑似污染 IP {ip}（{reason}）")
-            continue
-        sc, sb = _do_request(f"https://{ip}", token, params, path, method, body, timeout,
-                             domain, verify=False, proxies={"http": None, "https": None})
-        # 个别 Akamai 边缘未映射该 vhost（返回 nginx 404），换下一个真实 IP 重试
-        if sc == 404 and isinstance(sb, dict) and "nginx" in str(sb.get("raw", "")):
-            print(f"[miniMax] 真实 IP {ip} 返回 nginx 404（非预期 vhost），尝试下一个…")
-            continue
-        # 真实 IP 仍被拦截网关伪响应（401）：继续尝试其他候选，不提前返回
-        if sc == 401:
-            print(f"[miniMax] 真实 IP {ip} 仍返回 401（疑似仍被拦截），尝试下一个…")
-            last_err = "真实 IP 仍被拦截（401）"
-            continue
-        if sc != 0:
-            _RESOLVED[domain] = ip
-            print(f"[miniMax] 已通过真实 IP {ip} 绕过（{reason}）")
-            return sc, sb
-        last_err = (sb or {}).get("error") if isinstance(sb, dict) else str(sb)
-    return 0, {"error": f"DNS 污染且 UDP/DoH 真实 IP 均不可达：{last_err}"}
+    """带签名的请求。若已配置出网代理(MINIMAX_PROXY)，请求走本地代理直连域名。"""
+    proxies = _PROXIES or None
+    sc, sb = _do_request(host, token, params, path, method, body, timeout, proxies)
+    return sc, sb
 
 
 def renew_token(token: str, params: dict):
@@ -1029,30 +639,27 @@ def checkin_once(cred: dict):
         return "NO_CREDENTIAL", ("未获取到 MiniMax 登录态，请设置环境变量 MINIMAX_TOKEN / MINIMAX_USER_ID"
                                  "（或运行 python minimax_checkin.py --export-env --save 刷新）")
 
-    # 有候选 token 才拉起出网代理（如配置了 vless），覆盖本次所有请求；结束时清理
+    # 已配置出网代理(MINIMAX_PROXY)时，本次所有请求走本地代理；无需清理
     start_proxy_from_env()
-    try:
-        last = ("NO_CREDENTIAL", "未获取到 MiniMax 登录态")
-        for token, source in candidates:
-            try:
-                flag, content = _try_checkin(user_id, token, source)
-            except Exception as e:                       # 单个候选异常不中断其余尝试
-                flag, content = "ERROR", f"⚠️ 执行异常（token 来源：{source}）：{type(e).__name__}: {e}"
-                print(f"[miniMax] {content}")
-            if flag in ("SUCCESS", "ALREADY_TODAY", "RATE_LIMITED"):
-                return flag, _with_tag(tag, content)
-            last = (flag, content)
-            print(f"[miniMax] token 来源 {source} 失败：RESULT={flag} | {content}")
+    last = ("NO_CREDENTIAL", "未获取到 MiniMax 登录态")
+    for token, source in candidates:
+        try:
+            flag, content = _try_checkin(user_id, token, source)
+        except Exception as e:                       # 单个候选异常不中断其余尝试
+            flag, content = "ERROR", f"⚠️ 执行异常（token 来源：{source}）：{type(e).__name__}: {e}"
+            print(f"[miniMax] {content}")
+        if flag in ("SUCCESS", "ALREADY_TODAY", "RATE_LIMITED"):
+            return flag, _with_tag(tag, content)
+        last = (flag, content)
+        print(f"[miniMax] token 来源 {source} 失败：RESULT={flag} | {content}")
 
-        # 全部候选都失败：补一条可操作提示
-        flag, content = last
-        if flag == "AUTH_EXPIRED":
-            content += "｜处理：①本机 python minimax_checkin.py --export-env --save 重新导出；" \
-                       "②把新的 MINIMAX_TOKEN 填回青龙（注意别带引号）；" \
-                       "③若确认 token 无误仍 401，多为服务器出口 IP 被风控"
-        return flag, content
-    finally:
-        stop_proxy()
+    # 全部候选都失败：补一条可操作提示
+    flag, content = last
+    if flag == "AUTH_EXPIRED":
+        content += "｜处理：①本机 python minimax_checkin.py --export-env --save 重新导出；" \
+                   "②把新的 MINIMAX_TOKEN 填回青龙（注意别带引号）；" \
+                   "③若确认 token 无误仍 401，多为服务器出口 IP 被风控"
+    return flag, content
 
 
 _LEADING_ICONS = ("✅", "ℹ️", "⏳", "⚠️", "❌", "🎉")

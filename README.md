@@ -19,7 +19,7 @@
 * [douban_spider](douban_spider.py) 豆瓣小组（上海租房版demo）
 * [workbuddy_checkin](workbuddy_checkin.py) WorkBuddy 每日积分自动签到（100积分/天，连续第7天1000积分），**默认只读环境变量**，`--export-env`（或 `--export-env --save` 写回 .env）可读取本机登录态刷新 token，幂等可重复运行
 * [trae_checkin](trae_checkin.py) Trae Work 每日积分自动签到，**默认只读环境变量**（不再自动读本机）；**内置自动续期/自愈**：access token 仅约 14 天有效，脚本用 `refreshToken` + 设备 ECDSA 私钥（`--export-keys` 引导，纯标准库签名、无需第三方库）向 `ExchangeToken` 换发新 token，在「无 token / 即将过期(<48h) / 鉴权失败」时自动续期并重试，续期结果写回 `.trae_token.json` 缓存（青龙环境靠它自愈）；`--export-keys`（同 `--export-env`）/ `--renew` 配合 `--save` 可写回 .env 刷新
-* [minimax_checkin](minimax_checkin.py) MiniMax Code 每日积分自动签到（400积分/天，第4、7天1000积分），**默认只读环境变量**（不再自动读本机），逆向 `yy`/`x-signature` 签名；**每次运行先调 `/v1/api/user/renewal` 续期（相当于先登录）再签到**，新 token 自动写回 `.minimax_token.json` 缓存（青龙环境靠它自愈，token 永不失效）；内置【反 DNS 污染】与【.env 加载兜底】（解决服务器/青龙 401 真因：域名被解析到假 IP、python-dotenv 未装导致 MINIMAX_USER_ID 缺失）；`--export-env`（先续期再导出）/`--renew`（仅续期）配合 `--save` 可写回 .env 刷新
+* [minimax_checkin](minimax_checkin.py) MiniMax Code 每日积分自动签到（400积分/天，第4、7天1000积分），**默认只读环境变量**（不再自动读本机），逆向 `yy`/`x-signature` 签名；**每次运行先调 `/v1/api/user/renewal` 续期（相当于先登录）再签到**，新 token 自动写回 `.minimax_token.json` 缓存（青龙环境靠它自愈，token 永不失效）；`--export-env`（先续期再导出）/`--renew`（仅续期）配合 `--save` 可写回 .env 刷新
 * [checkin_all](checkin_all.py) 聚合签到（推荐）：**只需设一个定时**，依次跑 WorkBuddy / Trae Work / MiniMax Code 三个签到，合并结果后**只发一次推送**。各子脚本的单独定时可停用/删除。另支持 `python checkin_all.py --export-env --save` **一条命令批量刷新三个 token**（等价逐个执行各子脚本的 `--export-env --save`），要求本机三个桌面端均已登录
 
 ## 安装依赖库
@@ -95,26 +95,17 @@ export TRAE_MACHINE_ID=
 #   新 token 自动写回脚本同目录缓存 .minimax_token.json（青龙改不动环境变量，靠缓存自愈）
 # 填 token 时千万别带引号（青龙面板最常见坑，会直接 401）；脚本会自动去除首尾空白与配对引号
 #
-# ⚠️「服务器上跑总失败（401）」的真正根因（已内置修复，了解即可）：
-#   ① DNS 污染：被管控的服务器/网关会把 agent.minimax.io 解析到假 IP（如 198.20.0.x 拦截网关，
-#      表现「连不上 / 偶发 401」，与 token 是否过期无关）。脚本已内置【反 DNS 污染】：域名直连失败
-#      （含伪 401）时，自动【原始 UDP/53 直连公共解析器】（223.5.5.5 等，绕过本地污染递归）+ HTTPS DoH
-#      （阿里 AliDNS / Google）解析真实 Akamai IP 直连（verify=False+Host=域名），并跳过污染网段与死边缘。
-#      注意：很多服务器会屏蔽 8.8.8.8:443，故【优先 UDP/53】而非只依赖 Google DoH。
-#   ② 环境变量：服务器用 `export` 直接传参即可（如 WB_ACCESS_TOKEN=…），无需 dotenv；load_dotenv()
-#      默认不覆盖已存在的环境变量，故即使未装 python-dotenv 也能读到 export 的变量（WB 即如此跑通）。
-#      仅当本地依赖 .env 文件时才需 python-dotenv。无论哪种方式，务必保证
-#      MINIMAX_USER_ID = storage.json 里的 realUserID（不是 JWT 的 user.id），否则 status/claim 直 401
-#      （renewal 不校验 user_id，故表现为「续期成功但签到 401」）。
-#   ③ 若 UDP/53 与 DoH 均不可达，可设 MINIMAX_REAL_IP=<真实IPv4> 强制指定（本机
-#      `nslookup agent.minimax.io 223.5.5.5` 取得最新边缘 IP）。
-#   ④ 出口被透明 TLS 网关【全阻断】（所有真实 IP 都 nginx 404、DoH 全超时）时，可经 VLESS 代理
-#      干净出网：脚本会用 xray-core 在本地拉起 HTTP 代理(127.0.0.1:10808)，再让请求走它。
-#      - 服务器需装 xray-core（bash <(curl -L https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh)）。
-#      - 二选一（优先级高者优先）：
-#          export MINIMAX_VLESS='vless://<uuid>@<host>:<port>?security=tls&type=ws&host=<host>&sni=<host>&path=%2F&fp=chrome#tag'
-#          export MINIMAX_PROXY='http://127.0.0.1:10808'   # 你自己起好 xray/v2ray 时直接用这个
-#      - 注意 MINIMAX_VLESS 含 @ # ? 等字符，config.sh 里务必用【单引号】包裹。
+# 服务器用 `export` 直接传参即可（如 WB_ACCESS_TOKEN=…），无需 dotenv；load_dotenv()
+#   默认不覆盖已存在的环境变量，故即使未装 python-dotenv 也能读到 export 的变量（WB 即如此跑通）。
+#   务必保证 MINIMAX_USER_ID = storage.json 里的 realUserID（不是 JWT 的 user.id），否则 status/claim 直 401
+#   （renewal 不校验 user_id，故表现为「续期成功但签到 401」）。
+#
+# 服务器出口被透明 TLS 网关【全阻断】时，可经本地代理出网：
+#   - 自己用客户端（clash / xray 等）消费下方订阅地址，拉起本地 HTTP 代理，再设：
+#       export MINIMAX_PROXY='http://127.0.0.1:10808'
+#   - 订阅地址（供你的客户端消费，脚本不抓取）：
+#       https://rom.msdmcp.top/sub?token=54fb6f9b95583ec8ad17bad7493a276f
+#   - 注意 MINIMAX_PROXY 含特殊字符时一律用【单引号】包裹
 # token 失效/过期时：先去 MiniMax Agent 客户端重新登录（让其写回新 token），再在本机执行：
 #   python minimax_checkin.py --export-env --save  即可把最新 token/设备参数写回 .env
 # 只想续期现有 token（token 尚有效即可，任意机器）：
@@ -126,6 +117,8 @@ export MINIMAX_UUID=
 export MINIMAX_DEVICE_ID=
 # 可选：覆盖本机登录态配置文件路径（仅 --export-env 读取时使用，默认 %APPDATA%\MiniMax Agent\minimax-agent-config.json）
 export MINIMAX_CONFIG_PATH=
+# 可选：覆盖本地代理地址（出口被网关阻断时用到；默认直连）
+export MINIMAX_PROXY=
 # 可选：设 1 关闭 token 缓存文件；设 MINIMAX_SAVE_ENV=0 则只写缓存不改写 .env
 export MINIMAX_NO_CACHE=
    ```
