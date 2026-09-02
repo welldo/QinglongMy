@@ -153,7 +153,7 @@ CLAIM_PATH = "/minimax-cloud/api/v1/signin/claim"
 # 靠这个缓存让 token 每次运行都滚动续期。
 CACHE_FILE = os.path.join(BASE_DIR, ".minimax_token.json")
 
-# 默认本机登录态配置文件（Windows）。可用 MINIMAX_CONFIG_PATH 覆盖。
+# 默认本机登录态配置文件（Windows，位于 %APPDATA%\MiniMax Agent\minimax-agent-config.json）
 DEFAULT_CONFIG_REL = os.path.join("MiniMax Agent", "minimax-agent-config.json")
 
 # 设备参数顺序严格对齐桌面端 mC() 构建顺序（影响 yy 签名）
@@ -331,8 +331,7 @@ def persist_token(token: str, source: str = "renewal") -> list:
 
 def read_local_credential():
     """读取本机 MiniMax Agent 登录态（tokens.accessToken）。"""
-    cfg_path = os.environ.get("MINIMAX_CONFIG_PATH", "").strip() or \
-        os.path.join(os.environ.get("APPDATA", ""), DEFAULT_CONFIG_REL)
+    cfg_path = os.path.join(os.environ.get("APPDATA", ""), DEFAULT_CONFIG_REL)
     if not cfg_path or not os.path.isfile(cfg_path):
         return None
     try:

@@ -114,8 +114,6 @@ export MINIMAX_USER_ID=
 # 可选：设备身份参数，留空时回落到脚本内写死的稳定默认值
 export MINIMAX_UUID=
 export MINIMAX_DEVICE_ID=
-# 可选：覆盖本机登录态配置文件路径（仅 --export-env 读取时使用，默认 %APPDATA%\MiniMax Agent\minimax-agent-config.json）
-export MINIMAX_CONFIG_PATH=
 # 可选：出网代理（出口被网关阻断时用到；默认直连）。由 MINIMAX_SUB 指定 VLESS 订阅地址
 export MINIMAX_SUB=
    ```
