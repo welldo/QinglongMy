@@ -4,7 +4,6 @@
 cron: 2 0 0 * * 6 epic_free_game.py
 new Env('Epic每周限免');
 """
-import json
 import requests
 import sendNotify
 from datetime import datetime
@@ -34,12 +33,6 @@ def get_free_games() -> dict:
                 game['end_date'] = offers[0]['promotionalOffers'][0]['endDate']
                 games['free_next'].append(game)
     return games
-
-
-def generate_json(games: dict, filename: str):
-    with open(filename, 'w') as f:
-        json.dump(games, f)
-        # json.dump(obj=games, fp=f, ensure_ascii=False, indent=4)
 
 
 def notify_markdown(games: dict):
@@ -86,11 +79,8 @@ def notify_markdown(games: dict):
 
 '''
     sendNotify.serverJMy("Epic 每周限免", content)
-    # with open(filename, 'w', encoding='utf-8') as f:
-    #     f.write(content)
 
 
 if __name__ == '__main__':
     games = get_free_games()
-    # generate_json(games, './epic_free_games.json')
     notify_markdown(games)

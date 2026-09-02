@@ -24,7 +24,6 @@ load_dotenv()
 
 
 def filter_item(job_item):
-    # print(job_item)
     title = f'''[{job_item['postTitle'].lower().strip()}]({job_item['url']})'''
     state = f'''{job_item['descContent']}
 {job_item['source']} {job_item['salary']} {job_item['jobType']}
@@ -83,11 +82,6 @@ def insert_db(list):
     conn.commit()
 
 
-def print_db():
-    for row in get_db_data():
-        print(row)
-
-
 def get_db_data():
     cursor.execute('SELECT * FROM titles')
     return cursor.fetchall()
@@ -102,7 +96,6 @@ def close_db():
 
 if __name__ == '__main__':
     try:
-        # print_db()
         get_hot_search()
         notify_markdown()
     finally:

@@ -175,8 +175,7 @@ def decrypt_trae_auth_info(encoded: str) -> dict:
     return json.loads(payload.decode("utf-8"))
 
 def encrypt_trae_auth_info(plaintext: str) -> str:
-    import os as _os
-    random_key = _os.urandom(32)
+    random_key = os.urandom(32)
     secret = bytes(a ^ b for a, b in zip(LEFT_SECRET, RIGHT_SECRET))
     derived = _sha512(_sha512(random_key) + secret)
     key, iv = derived[:16], derived[16:32]

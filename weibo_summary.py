@@ -175,24 +175,20 @@ def filter_item(realtime_item):
     if any(word in title for item in otherList for word in item.split()):
         print("in otherList")
         return False
-    # print(realtime_item)
     item = {
-        # 'num': realtime_item['realpos'],
         'title': title,
         'state': state,
     }
     summary_list.append(item)
 
 
-# 热搜 flag（新/热/爆）对应的官方角标图片，参考 newsnow 的 weibo 源
-FLAG_ICONS = {
-    "新": "https://simg.s.weibo.com/moter/flags/1_0.png",
-    "热": "https://simg.s.weibo.com/moter/flags/2_0.png",
-    "爆": "https://simg.s.weibo.com/moter/flags/4_0.png",
-}
-
 # 角标图片 URL -> 热搜 flag，用于从 newsnow 接口返回的 icon 反推 新/热/爆
-ICON_TO_FLAG = {url: flag for flag, url in FLAG_ICONS.items()}
+# （参考 newsnow 的 weibo 源，官方角标见 https://simg.s.weibo.com/moter/flags/{1_0,2_0,4_0}.png）
+ICON_TO_FLAG = {
+    "https://simg.s.weibo.com/moter/flags/1_0.png": "新",
+    "https://simg.s.weibo.com/moter/flags/2_0.png": "热",
+    "https://simg.s.weibo.com/moter/flags/4_0.png": "爆",
+}
 
 
 def get_hot_search():
@@ -285,11 +281,6 @@ def insert_db(list):
     conn.commit()
 
 
-def print_db():
-    for row in get_db_data():
-        print(row)
-
-
 def get_db_data():
     cursor.execute('SELECT * FROM titles')
     return cursor.fetchall()
@@ -304,7 +295,6 @@ def close_db():
 
 if __name__ == '__main__':
     try:
-        # print_db()
         get_hot_search()
         notify_markdown()
     finally:
