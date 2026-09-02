@@ -77,7 +77,6 @@ def add_sw_increase():
     increase = ''
     current = ''
     try:
-        # resp = requests.get(sw_url, headers=headers, verify=False)
         resp = requests.get(sw_url, headers=headers)
         if resp.status_code != 200:
             print(f"请求失败，状态码：{resp.status_code}")

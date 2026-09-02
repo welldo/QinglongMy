@@ -587,7 +587,7 @@ def _do_request(connect_base, token, params, path, method, body, timeout, proxie
 
 
 def api_call(host, token, params, path, method="GET", body=None, timeout=30):
-    """带签名的请求。若已配置出网代理(MINIMAX_PROXY)，请求走本地代理直连域名。"""
+    """带签名的请求。若已配置出网代理（MINIMAX_PROXY / MINIMAX_SUB / MINIMAX_VLESS 任一），请求走本地代理直连域名。"""
     proxies = _PROXIES or None
     sc, sb = _do_request(host, token, params, path, method, body, timeout, proxies)
     return sc, sb
