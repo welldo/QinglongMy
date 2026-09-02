@@ -281,6 +281,23 @@ def _extract_private_d(private_pem: str) -> int:
     return int.from_bytes(der[j + 2:j + 2 + 32], "big")
 
 
+def _normalize_pem(raw: str) -> str:
+    """把 env 里的 PEM 统一成标准 PEM 文本。支持两种输入：
+    - 标准多行 PEM（含 -----BEGIN-----）；
+    - 单行 base64（把整段 PEM 做了 base64 后去换行）——用于 qinglong config.sh 等
+      不支持多行值的 shell 环境，避免多行未加引号导致 shell 把换行当成多条命令执行。
+    返回标准 PEM 文本（含换行），后续 _extract_private_d 等可正常解析。"""
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    if "-----BEGIN" in s:
+        return s
+    try:
+        return base64.b64decode(s).decode("utf-8", "replace")
+    except Exception:
+        return s
+
+
 def ecdsa_sign_pure(private_pem: str, data: bytes) -> str:
     """用设备 EC 私钥对数据做 ECDSA P-256/SHA-256 签名，返回 base64(DER)。"""
     d = _extract_private_d(private_pem)
@@ -572,8 +589,8 @@ def resolve_credentials():
         "device_id": os.environ.get("TRAE_DEVICE_ID", "").strip(),
         "user_id": os.environ.get("TRAE_USER_ID", "").strip(),
         "refresh_token": os.environ.get("TRAE_REFRESH_TOKEN", "").strip(),
-        "device_key_pem": os.environ.get("TRAE_DEVICE_KEY_PEM", "").strip(),
-        "device_pub_pem": os.environ.get("TRAE_DEVICE_PUB_PEM", "").strip(),
+        "device_key_pem": _normalize_pem(os.environ.get("TRAE_DEVICE_KEY_PEM", "")),
+        "device_pub_pem": _normalize_pem(os.environ.get("TRAE_DEVICE_PUB_PEM", "")),
         "machine_id": os.environ.get("TRAE_MACHINE_ID", "").strip(),
         "expires_ms": 0,
         "refresh_expires_ms": 0,
@@ -819,8 +836,8 @@ def export_env():
         "TRAE_DEVICE_ID": c["device_id"],
         "TRAE_USER_ID": c["user_id"],
         "TRAE_REFRESH_TOKEN": c["refresh_token"],
-        "TRAE_DEVICE_KEY_PEM": c["device_key_pem"],
-        "TRAE_DEVICE_PUB_PEM": c["device_pub_pem"],
+        "TRAE_DEVICE_KEY_PEM": base64.b64encode((c["device_key_pem"] or "").encode()).decode(),
+        "TRAE_DEVICE_PUB_PEM": base64.b64encode((c["device_pub_pem"] or "").encode()).decode(),
         "TRAE_MACHINE_ID": c["machine_id"],
     }
     for k, v in values.items():

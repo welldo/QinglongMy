@@ -591,30 +591,41 @@ def _udp_resolve(domain: str):
     return []
 
 
+# DoH 供应商：(url, 线格式?, 是否走系统代理?)。
+# - 主机名类（cloudflare-dns.com / dns.google）走系统代理，且依赖「网关只毒特定域名」的假设：
+#   若管控网关仅劫持 agent.minimax.io、不劫持这些 DoH 主机名，则它们能解析出真实 IP。
+# - IP 类（223.5.5.5 / 8.8.8.8）强制直连（proxies=None），用于能直连公共解析器的网络。
 _DOH_PROVIDERS = [
-    ("https://223.5.5.5/dns-query", True),    # 阿里 AliDNS DoH（线格式 dns=）
-    ("https://8.8.8.8/resolve", False),        # Google DoH（name/type 格式）
+    ("https://cloudflare-dns.com/dns-query", True, True),   # 主机名，走系统代理
+    ("https://dns.google/resolve", False, True),             # 主机名，走系统代理
+    ("https://223.5.5.5/dns-query", True, False),            # 阿里 AliDNS DoH（线格式 dns=）
+    ("https://8.8.8.8/resolve", False, False),               # Google DoH（name/type 格式）
 ]
+
+# 最后兜底：当前（解析时）有效的 Akamai 边缘 IP。Akamai 边缘会轮换，故仅当 UDP/53 与
+# 全部 DoH 均不可达时才用；api_call 回退循环会跳过污染网段与 nginx 404 的死边缘。
+_FALLBACK_IPS = ["2.16.168.107", "2.16.168.102", "23.46.216.82", "23.32.91.196", "23.32.91.197"]
 
 
 def _doh_resolve(domain: str):
-    """HTTPS DoH 兜底（用于 UDP/53 被封锁的环境）。失败返回 []。"""
+    """HTTPS DoH 解析真实 IPv4（UDP/53 不可达时的兜底）。失败返回 []。"""
     wire = _b64.urlsafe_b64encode(_dns_query_wire(domain)).rstrip(b"=").decode()
     last_err = ""
-    for url, wire_fmt in _DOH_PROVIDERS:
+    for url, wire_fmt, use_proxy in _DOH_PROVIDERS:
         try:
             if wire_fmt:
                 params, headers = {"dns": wire}, {"Accept": "application/dns-message"}
             else:
                 params, headers = {"name": domain, "type": "A"}, {"Accept": "application/dns-json"}
+            proxies = None if not use_proxy else {}   # use_proxy=True 时让 requests 用环境代理
             r = requests.get(url, params=params, headers=headers,
-                             timeout=10, verify=False, proxies={"http": None, "https": None})
+                             timeout=10, verify=False, proxies=proxies)
             ips = []
             try:
                 j = r.json()   # Google 等返回 JSON
                 ips = [a["data"] for a in j.get("Answer", []) if a.get("type") == 1]
             except Exception:
-                # AliDNS 等返回二进制 application/dns-message，按线格式解析
+                # AliDNS / Cloudflare 等可能返回二进制 application/dns-message，按线格式解析
                 ips = _parse_a_records(r.content)
             if ips:
                 return ips
@@ -626,20 +637,23 @@ def _doh_resolve(domain: str):
 
 
 def _resolve_real_ips(host: str):
-    """返回真实 IP 候选列表：MINIMAX_REAL_IP 手动覆盖 > UDP/53 > HTTPS DoH。"""
+    """返回真实 IP 候选列表（按成功率排序）：
+    MINIMAX_REAL_IP 手动覆盖 > 主机名 DoH > UDP/53 > IP DoH > 内置兜底 IP。"""
     manual = clean_env_value(os.environ.get("MINIMAX_REAL_IP", ""))
     if manual:
         return [manual]
     domain = _domain_of(host)
+    ips = _doh_resolve(domain)          # 主机名 DoH 优先（可能绕过仅毒特定域名的网关）
+    if ips:
+        print(f"[miniMax] DoH 解析 {domain} -> {ips}")
+        return ips
     ips = _udp_resolve(domain)
     if ips:
         print(f"[miniMax] UDP/53 解析 {domain} -> {ips}")
         return ips
-    ips = _doh_resolve(domain)
-    if ips:
-        print(f"[miniMax] DoH 解析 {domain} -> {ips}")
-        return ips
-    return []
+    if _FALLBACK_IPS:
+        print(f"[miniMax] 解析均不可达，使用内置兜底 IP：{_FALLBACK_IPS}")
+    return list(_FALLBACK_IPS)
 
 
 def _do_request(connect_base, token, params, path, method, body, timeout, host_header=None, verify=True):
