@@ -190,21 +190,15 @@ def encrypt_trae_auth_info(plaintext: str) -> str:
     return base64.b64encode(envelope).decode("utf-8")
 
 # ---- ECDSA 签名（使用 pycryptodome） ----
-# P-256 曲线阶 N（用于低 s 归一化）
 _N = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551
 
 def _der_encode_signature(r: int, s: int) -> bytes:
-    """将 r, s 编码为 ASN.1 DER 签名（长度固定为 0x44）。"""
     def _enc(x):
-        b = x.to_bytes(32, "big")  # 固定 32 字节，前面补零
-        # 若最高位为 1，需加 0x00 前缀（但我们的 r/s 可能小于 N，最高位大概率0，但保留安全）
+        b = x.to_bytes(32, "big")
         if b[0] & 0x80:
             b = b"\x00" + b
         return b
     rb, sb = _enc(r), _enc(s)
-    # 总长度 0x44 = 2 + (2+32) + (2+32) = 70 字节，但若加了前缀会更长，为简单处理我们用动态长度
-    # 正常情况 rb/sb 长度 32，若加了前缀则为33，需调整总长度
-    # 此处用动态长度更通用
     body = b"\x02" + bytes([len(rb)]) + rb + b"\x02" + bytes([len(sb)]) + sb
     return b"\x30" + bytes([len(body)]) + body
 
@@ -520,10 +514,21 @@ def resolve_credentials():
                 cred[k] = cache[k]
     return cred
 
-AUTH_FAIL_KEYWORDS = ("unauthorized", "token", "expired", "not login",
-                      "not logged", "登录", "鉴权", "authenticate")
-RATE_LIMIT_KEYWORDS = ("频繁", "frequent", "too many", "太多", "稍后再试",
-                       "繁忙", "busy")
+# ---- 精简后的错误判断 ----
+def is_auth_failure(http_status: int, data) -> bool:
+    if http_status in (401, 403):
+        return True
+    if isinstance(data, dict):
+        code = data.get("code")
+        if isinstance(code, (int, float)) and code in (401, 403, 1001):
+            return True
+    return False
+
+def is_rate_limited(http_status: int, data) -> bool:
+    # 仅凭状态码判断，429 或 5xx 视为限频/临时故障
+    if http_status in (429, 500, 502, 503, 504):
+        return True
+    return False
 
 def api_succeeded(data: dict) -> bool:
     if not isinstance(data, dict):
@@ -537,30 +542,6 @@ def api_succeeded(data: dict) -> bool:
         return True
     return str(data.get("status", "")).lower() == "success"
 
-def is_auth_failure(http_status: int, data) -> bool:
-    if http_status in (401, 403):
-        return True
-    if not isinstance(data, dict):
-        return False
-    try:
-        code = int(str(data.get("code")))
-        if code in (401, 403, 1001):
-            return True
-    except (TypeError, ValueError):
-        pass
-    msg = str(data.get("message") or data.get("msg") or "").lower()
-    if any(k in msg for k in RATE_LIMIT_KEYWORDS):
-        return False
-    return any(k.lower() in msg for k in AUTH_FAIL_KEYWORDS)
-
-def is_rate_limited(http_status: int, data) -> bool:
-    if http_status in (429, 500, 502, 503, 504):
-        return True
-    if not isinstance(data, dict):
-        return False
-    msg = str(data.get("message") or data.get("msg") or "")
-    return any(k in msg for k in RATE_LIMIT_KEYWORDS)
-
 def build_checkin_headers(token: str, device_id: str) -> dict:
     return {
         "content-type": "application/json",
@@ -570,7 +551,6 @@ def build_checkin_headers(token: str, device_id: str) -> dict:
     }
 
 def api_call(host, token, device_id, path, body=None, timeout=30):
-    """发起签到接口请求，静默运行，仅出错时打印简短信息。"""
     headers = build_checkin_headers(token, device_id)
     url = f"{host}{path}"
     req_body = json.dumps(body or {})
@@ -649,12 +629,13 @@ def checkin_once(cred: dict):
             if is_auth_failure(sc, sb):
                 return "AUTH_EXPIRED", f"⚠️ 续期后再次鉴权失败（HTTP {sc}），请检查设备证明材料是否完整"
         else:
-            return "AUTH_EXPIRED", (f"⚠️ 鉴权失败（HTTP {sc}），请打开 Trae 桌面端刷新登录态，"
-                                     "或运行 python trae_checkin.py --export-keys --save 引导自动续期")
+            msg = (sb or {}).get("message") or (sb or {}).get("msg") or "未知错误"
+            return "AUTH_EXPIRED", f"⚠️ 鉴权失败（HTTP {sc}）：{msg}，请打开 Trae 桌面端刷新登录态，或运行 python trae_checkin.py --export-keys --save 引导自动续期"
+
     if not api_succeeded(sb):
         msg = (sb or {}).get("message") or (sb or {}).get("msg") or json.dumps(sb, ensure_ascii=False)[:120]
         if is_rate_limited(sc, sb):
-            return "RATE_LIMITED", f"⏳ 服务端限频（活动高峰容量不足，与请求特征无关）：{msg}，建议错峰或稍后重试"
+            return "RATE_LIMITED", f"⏳ 服务端限频/临时故障：{msg}，建议错峰或稍后重试"
         return "STATUS_ERR", f"⚠️ 状态查询异常：HTTP {sc} {msg}"
 
     # 2) 领取
@@ -669,7 +650,9 @@ def checkin_once(cred: dict):
                 return "AUTH_EXPIRED", f"⚠️ 领取时鉴权失败（HTTP {cc}）且自动续期失败：{msg}"
             cc, cb = api_call(host, token, device_id, CLAIM_PATH)
         else:
-            return "AUTH_EXPIRED", f"⚠️ 领取时鉴权失败（HTTP {cc}），请打开 Trae 桌面端刷新登录态"
+            msg = (cb or {}).get("message") or (cb or {}).get("msg") or "未知错误"
+            return "AUTH_EXPIRED", f"⚠️ 领取时鉴权失败（HTTP {cc}）：{msg}，请打开 Trae 桌面端刷新登录态"
+
     if api_succeeded(cb):
         points = ((cb.get("data") or {}).get("points")) or cb.get("points")
         message = cb.get("message") or cb.get("msg") or ""
@@ -681,7 +664,7 @@ def checkin_once(cred: dict):
 
     msg = (cb or {}).get("message") or (cb or {}).get("msg") or json.dumps(cb, ensure_ascii=False)[:150]
     if is_rate_limited(cc, cb):
-        return "RATE_LIMITED", f"⏳ 服务端限频（活动高峰容量不足，与请求特征无关）：{msg}，建议错峰或稍后重试"
+        return "RATE_LIMITED", f"⏳ 服务端限频/临时故障：{msg}，建议错峰或稍后重试"
     return "FAIL", f"⚠️ 签到未成功：HTTP {cc} {msg}"
 
 # ---- 命令行功能 ----
