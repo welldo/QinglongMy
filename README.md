@@ -12,7 +12,7 @@
 * [epic_free_game](epic_free_game.py) Epic每周限免信息
 * [stock_spider](stock_spider.py) 获取股票、指数行情数据推送到微信，支持实时查看行情
 * [trade_notify](trade_notify.py) 监控指定股票的行情，并在满足特定条件时发送通知，提醒买入或卖出时机
-* [weibo_summary](weibo_summary.py) 抓取微博热搜榜，Sqlite数据库去重，过滤一些不感兴趣的内容，简单的词频分析
+* [weibo_summary](weibo_summary.py) 通过 newsnow 线上接口（https://newsnow.busiyi.world/api/s?id=weibo）获取微博热搜榜，无需本地 Cookie；Sqlite 数据库去重，过滤不感兴趣内容，简单词频分析
 * [send_qq_email](send_qq_email.py) 发送带附件的电子邮件
 * [job_spider](job_spider.py) 指定过滤条件获取远程工作信息
 * [xb](xb.py) 全网羊毛线报精选，使用 gemini-3-flash-preview 模型进行内容分析
