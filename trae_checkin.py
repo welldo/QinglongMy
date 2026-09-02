@@ -739,7 +739,6 @@ def checkin_once(cred: dict):
     """
     cred = cred or {}
     token = cred.get("token", "").strip()
-    tag = cred.get("user_id") or "未知用户"
     device_id = cred.get("device_id", "")
 
     # 无 token 但有续期材料：先续期再签到
@@ -747,7 +746,7 @@ def checkin_once(cred: dict):
         if _can_self_heal(cred):
             ok, msg = self_heal(cred)
             if not ok:
-                return "AUTH_EXPIRED", f"⚠️ {tag} 未获取到 token 且自动续期失败：{msg}"
+                return "AUTH_EXPIRED", f"⚠️ 未获取到 token 且自动续期失败：{msg}"
             token = cred["token"]
             print(f"[trae] {msg}")
         else:
@@ -771,7 +770,7 @@ def checkin_once(cred: dict):
     if isinstance(sb, dict) and sb.get("checked_in"):
         pts = query_points(host, token, device_id)
         extra = f"，剩余积分 {pts}" if pts is not None else ""
-        return "ALREADY_TODAY", f"ℹ️ {tag} 今日已签到{extra}"
+        return "ALREADY_TODAY", f"ℹ️ 今日已签到{extra}"
     if is_auth_failure(sc, sb):
         if _can_self_heal(cred):
             ok, msg = self_heal(cred)
@@ -779,22 +778,22 @@ def checkin_once(cred: dict):
                 token = cred["token"]
                 print(f"[trae] {msg}")
             else:
-                return "AUTH_EXPIRED", f"⚠️ {tag} 鉴权失败（HTTP {sc}）且自动续期失败：{msg}"
+                return "AUTH_EXPIRED", f"⚠️ 鉴权失败（HTTP {sc}）且自动续期失败：{msg}"
             sc, sb = api_call(host, token, device_id, STATUS_PATH)
             if isinstance(sb, dict) and sb.get("checked_in"):
                 pts = query_points(host, token, device_id)
                 extra = f"，剩余积分 {pts}" if pts is not None else ""
-                return "ALREADY_TODAY", f"ℹ️ {tag} 今日已签到{extra}（已自动续期）"
+                return "ALREADY_TODAY", f"ℹ️ 今日已签到{extra}（已自动续期）"
             if is_auth_failure(sc, sb):
-                return "AUTH_EXPIRED", f"⚠️ {tag} 续期后再次鉴权失败（HTTP {sc}），请检查设备证明材料是否完整"
+                return "AUTH_EXPIRED", f"⚠️ 续期后再次鉴权失败（HTTP {sc}），请检查设备证明材料是否完整"
         else:
-            return "AUTH_EXPIRED", (f"⚠️ {tag} 鉴权失败（HTTP {sc}），请打开 Trae 桌面端刷新登录态，"
+            return "AUTH_EXPIRED", (f"⚠️ 鉴权失败（HTTP {sc}），请打开 Trae 桌面端刷新登录态，"
                                      "或运行 python trae_checkin.py --export-keys --save 引导自动续期")
     if not api_succeeded(sb):
         msg = (sb or {}).get("message") or (sb or {}).get("msg") or json.dumps(sb, ensure_ascii=False)[:120]
         if is_rate_limited(sc, sb):
-            return "RATE_LIMITED", f"⏳ {tag} 服务端限频（活动高峰容量不足，与请求特征无关）：{msg}，建议错峰或稍后重试"
-        return "STATUS_ERR", f"⚠️ {tag} 状态查询异常：HTTP {sc} {msg}"
+            return "RATE_LIMITED", f"⏳ 服务端限频（活动高峰容量不足，与请求特征无关）：{msg}，建议错峰或稍后重试"
+        return "STATUS_ERR", f"⚠️ 状态查询异常：HTTP {sc} {msg}"
 
     # 2) 领取
     cc, cb = api_call(host, token, device_id, CLAIM_PATH)
@@ -805,10 +804,10 @@ def checkin_once(cred: dict):
                 token = cred["token"]
                 print(f"[trae] {msg}")
             else:
-                return "AUTH_EXPIRED", f"⚠️ {tag} 领取时鉴权失败（HTTP {cc}）且自动续期失败：{msg}"
+                return "AUTH_EXPIRED", f"⚠️ 领取时鉴权失败（HTTP {cc}）且自动续期失败：{msg}"
             cc, cb = api_call(host, token, device_id, CLAIM_PATH)
         else:
-            return "AUTH_EXPIRED", f"⚠️ {tag} 领取时鉴权失败（HTTP {cc}），请打开 Trae 桌面端刷新登录态"
+            return "AUTH_EXPIRED", f"⚠️ 领取时鉴权失败（HTTP {cc}），请打开 Trae 桌面端刷新登录态"
     if api_succeeded(cb):
         points = ((cb.get("data") or {}).get("points")) or cb.get("points")
         message = cb.get("message") or cb.get("msg") or ""
@@ -816,12 +815,12 @@ def checkin_once(cred: dict):
         extra = f"，剩余积分 {pts}" if pts is not None else ""
         text = "签到成功" if message == "success" else message
         gain = f"本次 +{points} 积分" if points else text
-        return "SUCCESS", f"✅ {tag} {gain}{extra}"
+        return "SUCCESS", f"✅ {gain}{extra}"
 
     msg = (cb or {}).get("message") or (cb or {}).get("msg") or json.dumps(cb, ensure_ascii=False)[:150]
     if is_rate_limited(cc, cb):
-        return "RATE_LIMITED", f"⏳ {tag} 服务端限频（活动高峰容量不足，与请求特征无关）：{msg}，建议错峰或稍后重试"
-    return "FAIL", f"⚠️ {tag} 签到未成功：HTTP {cc} {msg}"
+        return "RATE_LIMITED", f"⏳ 服务端限频（活动高峰容量不足，与请求特征无关）：{msg}，建议错峰或稍后重试"
+    return "FAIL", f"⚠️ 签到未成功：HTTP {cc} {msg}"
 
 
 def export_env():
